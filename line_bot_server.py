@@ -99,17 +99,16 @@ def handle_image_message(message_id: str, reply_token: str, user_id: str):
                 
         lines.append("─────────────────────────")
         
-        # Helper to format item row
         def format_item_list(items, title):
             res = []
             if items:
                 res.append(f"📌 หมวด [{title}] ({len(items)} รายการ):")
                 for idx, itm in enumerate(items, 1):
                     s1 = itm.get('set1', '')
-                    s3 = f" {itm.get('set3')}" if itm.get('set3') else ""
+                    s3 = f"{itm.get('set3')} " if itm.get('set3') else ""
                     s2 = itm.get('set2', '')
                     err_icon = " ❌" if not itm.get('is_valid') else ""
-                    res.append(f" {idx}. {s1} = {s3}{s2}{err_icon}")
+                    res.append(f" {idx}. {s1} = {s3}{s2}{err_icon}".strip())
                 res.append("")
             return res
 
@@ -178,41 +177,51 @@ def render_html_dashboard() -> str:
     conn = database.get_db_connection()
     cursor = conn.cursor()
     cursor.execute("""
-    SELECT e.sheet_id, e.employee_name, e.date_str, e.category, e.set1, e.set3, e.set2, e.raw_text, e.is_valid, e.validation_error, s.id as sheet_id_num
-    FROM entries e
-    JOIN sheets s ON e.sheet_db_id = s.id
-    ORDER BY s.id DESC, e.id ASC
-    LIMIT 300
+    SELECT category, set1, set3, set2, is_valid
+    FROM entries
+    ORDER BY sheet_db_id ASC, id ASC
     """)
     rows = cursor.fetchall()
     conn.close()
 
-    # Count categories
-    count_top = sum(1 for r in rows if r['category'] == 'บน')
-    count_bot = sum(1 for r in rows if r['category'] == 'ล่าง')
-    count_topbot = sum(1 for r in rows if r['category'] == 'บนล่าง')
+    top_items = []
+    bot_items = []
+    topbot_items = []
+
+    for r in rows:
+        cat = r["category"]
+        s1 = r["set1"].strip()
+        s2 = r["set2"].strip()
+        s3 = r["set3"].strip()
+        s3_part = f"<span style='color:#d97706;font-weight:700'>{s3}</span> " if s3 else ""
+        item_html = f"<strong>{s1}</strong> = {s3_part}{s2}"
+        
+        if cat == "บน":
+            top_items.append(item_html)
+        elif cat == "ล่าง":
+            bot_items.append(item_html)
+        elif cat == "บนล่าง":
+            topbot_items.append(item_html)
+
+    max_len = max(len(top_items), len(bot_items), len(topbot_items), 1)
 
     table_rows_html = ""
-    for r in rows:
-        status_badge = '<span class="badge badge-success">✓ ถูกต้อง</span>' if r['is_valid'] else f'<span class="badge badge-error">⚠️ {r["validation_error"]}</span>'
-        cat_badge = f'<span class="badge badge-cat">{r["category"]}</span>'
-        set3_text = f'<strong style="color:#d97706">{r["set3"]}</strong>' if r["set3"] else "-"
-        table_rows_html += f"""
-        <tr class="entry-row" data-set1="{r['set1']}" data-sheet="{r['sheet_id']}">
-            <td><strong style="color:#2563eb">ใบที่ {r['sheet_id'] or '-'}</strong></td>
-            <td>{cat_badge}</td>
-            <td><span class="set1-tag">{r['set1']}</span></td>
-            <td>{set3_text}</td>
-            <td><strong>{r['set2']}</strong></td>
-            <td style="color:#64748b; font-size:12px">{r['raw_text']}</td>
-            <td>{status_badge}</td>
-            <td style="color:#64748b; font-size:12px">{r['employee_name'] or '-'}</td>
-            <td style="color:#64748b; font-size:12px">{r['date_str'] or '-'}</td>
-        </tr>
-        """
-
-    if not rows:
-        table_rows_html = "<tr><td colspan='9' style='text-align:center; padding:40px; color:#94a3b8;'>ยังไม่มีข้อมูล ส่งรูปถ่ายผ่าน LINE เข้ามาได้เลยครับ</td></tr>"
+    if rows:
+        for i in range(max_len):
+            row_num = i + 1
+            top_v = top_items[i] if i < len(top_items) else ""
+            bot_v = bot_items[i] if i < len(bot_items) else ""
+            topbot_v = topbot_items[i] if i < len(topbot_items) else ""
+            table_rows_html += f"""
+            <tr class="entry-row">
+                <td style="color:#64748b; font-weight:600; text-align:center">{row_num}</td>
+                <td class="col-val">{top_v}</td>
+                <td class="col-val">{bot_v}</td>
+                <td class="col-val">{topbot_v}</td>
+            </tr>
+            """
+    else:
+        table_rows_html = "<tr><td colspan='4' style='text-align:center; padding:40px; color:#94a3b8;'>ยังไม่มีข้อมูล ส่งรูปถ่ายผ่าน LINE เข้ามาได้เลยครับ</td></tr>"
 
     html = f"""<!DOCTYPE html>
 <html lang="th">
@@ -220,7 +229,6 @@ def render_html_dashboard() -> str:
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ระบบกระดานสรุปข้อมูล Real-Time</title>
-    <!-- Auto refresh every 15 seconds -->
     <meta http-equiv="refresh" content="15">
     <style>
         * {{ box-sizing: border-box; font-family: -apple-system, BlinkMacSystemFont, "Prompt", "Segoe UI", Roboto, sans-serif; }}
@@ -243,23 +251,22 @@ def render_html_dashboard() -> str:
         .btn-export:hover {{ background: #047857; }}
 
         .table-container {{ background: white; border: 1px solid #e2e8f0; border-radius: 12px; overflow-x: auto; box-shadow: 0 1px 3px rgba(0,0,0,0.05); }}
-        table {{ width: 100%; border-collapse: collapse; text-align: left; font-size: 14px; }}
-        th {{ background: #f1f5f9; padding: 12px 14px; font-weight: 700; color: #475569; border-bottom: 1px solid #e2e8f0; white-space: nowrap; }}
-        td {{ padding: 12px 14px; border-bottom: 1px solid #f1f5f9; white-space: nowrap; }}
+        table {{ width: 100%; border-collapse: collapse; text-align: left; font-size: 15px; }}
+        th {{ background: #f1f5f9; padding: 14px 18px; font-weight: 800; color: #1e293b; border-bottom: 2px solid #cbd5e1; }}
+        th.th-top {{ color: #2563eb; font-size: 16px; }}
+        th.th-bot {{ color: #dc2626; font-size: 16px; }}
+        th.th-topbot {{ color: #7c3aed; font-size: 16px; }}
+        td {{ padding: 12px 18px; border-bottom: 1px solid #f1f5f9; }}
         tr:hover {{ background: #f8fafc; }}
+        .col-val {{ font-size: 15px; }}
 
-        .set1-tag {{ font-size: 16px; font-weight: 800; color: #1e293b; background: #e2e8f0; padding: 2px 8px; border-radius: 6px; }}
-        .badge {{ padding: 3px 8px; border-radius: 6px; font-size: 12px; font-weight: 600; display: inline-block; }}
-        .badge-cat {{ background: #eff6ff; color: #1d4ed8; }}
-        .badge-success {{ background: #dcfce7; color: #15803d; }}
-        .badge-error {{ background: #fee2e2; color: #b91c1c; }}
         .footer-note {{ text-align: center; color: #94a3b8; font-size: 12px; margin-top: 20px; }}
     </style>
 </head>
 <body>
     <div class="header">
         <div>
-            <h1 class="title">📋 กระดานสรุปตัวเลข Real-Time</h1>
+            <h1 class="title">📋 กระดานสรุปตัวเลข Real-Time (รูปแบบ 3 คอลัมน์)</h1>
             <span class="live-tag"><span class="live-dot"></span> อัปเดตสดอัตโนมัติ (ทุก 15 วินาที)</span>
         </div>
         <a href="/export" class="btn-export" download>📥 ดาวน์โหลดไฟล์ Excel (.CSV)</a>
@@ -276,35 +283,30 @@ def render_html_dashboard() -> str:
         </div>
         <div class="stat-card">
             <div class="stat-label">หมวด "บน"</div>
-            <div class="stat-num">{count_top}</div>
+            <div class="stat-num" style="color:#2563eb">{len(top_items)}</div>
         </div>
         <div class="stat-card">
             <div class="stat-label">หมวด "ล่าง"</div>
-            <div class="stat-num">{count_bot}</div>
+            <div class="stat-num" style="color:#dc2626">{len(bot_items)}</div>
         </div>
         <div class="stat-card">
             <div class="stat-label">หมวด "บนล่าง"</div>
-            <div class="stat-num">{count_topbot}</div>
+            <div class="stat-num" style="color:#7c3aed">{len(topbot_items)}</div>
         </div>
     </div>
 
     <div class="search-box">
-        <input type="text" id="searchInput" class="search-input" placeholder="🔍 พิมพ์ค้นหาเลขชุดที่ 1 หรือเลขใบที่ได้ทันที เช่น 401, 377, 96/17..." onkeyup="filterTable()">
+        <input type="text" id="searchInput" class="search-input" placeholder="🔍 พิมพ์ค้นหาตัวเลข เช่น 401, 370, 12..." onkeyup="filterTable()">
     </div>
 
     <div class="table-container">
         <table id="dataTable">
             <thead>
                 <tr>
-                    <th>ใบที่</th>
-                    <th>หมวด</th>
-                    <th>ชุดที่ 1</th>
-                    <th>ชุดที่ 3</th>
-                    <th>ชุดที่ 2</th>
-                    <th>ข้อความดิบ</th>
-                    <th>สถานะ</th>
-                    <th>ผู้บันทึก</th>
-                    <th>วันที่</th>
+                    <th style="width: 80px; text-align: center;">ลำดับ</th>
+                    <th class="th-top">บน ({len(top_items)})</th>
+                    <th class="th-bot">ล่าง ({len(bot_items)})</th>
+                    <th class="th-topbot">บนล่าง ({len(topbot_items)})</th>
                 </tr>
             </thead>
             <tbody>
@@ -323,9 +325,8 @@ def render_html_dashboard() -> str:
             var filter = input.value.toUpperCase();
             var rows = document.getElementsByClassName('entry-row');
             for (var i = 0; i < rows.length; i++) {{
-                var set1 = rows[i].getAttribute('data-set1') || '';
-                var sheet = rows[i].getAttribute('data-sheet') || '';
-                if (set1.toUpperCase().indexOf(filter) > -1 || sheet.toUpperCase().indexOf(filter) > -1) {{
+                var rowText = rows[i].innerText || rows[i].textContent;
+                if (rowText.toUpperCase().indexOf(filter) > -1) {{
                     rows[i].style.display = "";
                 }} else {{
                     rows[i].style.display = "none";
@@ -344,13 +345,12 @@ class LineWebhookHandler(http.server.BaseHTTPRequestHandler):
             csv_path = database.export_csv()
             self.send_response(200)
             self.send_header("Content-Type", "text/csv; charset=utf-8-sig")
-            self.send_header("Content-Disposition", 'attachment; filename="report_realtime.csv"')
+            self.send_header("Content-Disposition", 'attachment; filename="report_all.csv"')
             self.end_headers()
             with open(csv_path, "rb") as f:
                 self.wfile.write(f.read())
             return
 
-        # Render Dashboard on root '/' or '/dashboard'
         html_content = render_html_dashboard().encode('utf-8')
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
