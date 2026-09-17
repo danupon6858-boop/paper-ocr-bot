@@ -1040,7 +1040,7 @@ class LineWebhookHandler(http.server.BaseHTTPRequestHandler):
             import ocr_engine
             info = {
                 "status": "ok",
-                "version": "v1.6-gemini-3.6",
+                "version": "v1.7-gemini-verified",
                 "primary_model": f"{ocr_engine.MODELS_CONFIG[0][0]}/{ocr_engine.MODELS_CONFIG[0][1]}",
                 "models": ocr_engine.MODELS_CONFIG,
                 "api_key_configured": bool(ocr_engine.API_KEY),
