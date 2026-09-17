@@ -109,11 +109,13 @@ RESPONSE_SCHEMA = {
 }
 
 MODELS_CONFIG = [
-    ("gemini-3.6-flash", 1),
-    ("gemini-flash-latest", 1)
+    ("gemini-2.5-flash", 2),
+    ("gemini-1.5-flash", 2),
+    ("gemini-flash-latest", 1),
+    ("gemini-3.6-flash", 1)
 ]
 GLOBAL_TIMEOUT_SECONDS = 55
-PER_REQUEST_TIMEOUT = 45
+PER_REQUEST_TIMEOUT = 35
 
 def clean_and_parse_json(text: str) -> dict:
     text = text.strip()
@@ -309,6 +311,8 @@ def extract_from_image(image_bytes: bytes, mime_type: str = "image/jpeg") -> dic
                 break
 
     if last_exception:
+        if isinstance(last_exception, urllib.error.HTTPError) and last_exception.code == 503:
+            raise RuntimeError("Google Gemini กำลังมีผู้ใช้งานหนาแน่นชั่วคราว (HTTP 503) กรุณาลองส่งใหม่อีกครั้งใน 10 วินาที")
         raise last_exception
     raise RuntimeError("Unable to extract data from image after retries.")
 
