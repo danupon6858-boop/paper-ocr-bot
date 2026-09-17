@@ -283,6 +283,19 @@ def get_pending_scan(scan_id: int) -> Optional[Dict]:
     conn.close()
     return dict(row) if row else None
 
+def get_latest_pending_scan(user_id: str) -> Optional[Dict]:
+    init_db()
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+    SELECT * FROM pending_scans
+    WHERE user_id = ? AND status = 'PENDING'
+    ORDER BY id DESC LIMIT 1
+    """, (user_id,))
+    row = cursor.fetchone()
+    conn.close()
+    return dict(row) if row else None
+
 def update_pending_scan_items(scan_id: int, new_columns: dict) -> bool:
     init_db()
     conn = get_db_connection()
