@@ -1,7 +1,7 @@
 import os
 
 GEMINI_API_KEY = (os.environ.get("GEMINI_API_KEY") or "").strip()
-MODEL = "gemini-3.6-flash"
+MODEL = "gemini-flash-lite-latest"
 
 LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET", "")
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "")

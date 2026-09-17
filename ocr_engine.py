@@ -130,14 +130,12 @@ RESPONSE_SCHEMA = {
 }
 
 MODELS_CONFIG = [
-    ("v1beta", "gemini-flash-latest", 1),
-    ("v1beta", "gemini-flash-lite-latest", 1),
-    ("v1beta", "gemini-3.5-flash", 1),
+    ("v1beta", "gemini-flash-lite-latest", 2),
     ("v1beta", "gemini-3.5-flash-lite", 1),
-    ("v1beta", "gemini-3.8-flash", 1),
+    ("v1beta", "gemini-3.5-flash", 1),
+    ("v1beta", "gemini-flash-latest", 1),
     ("v1beta", "gemini-pro-latest", 1),
-    ("v1beta", "gemini-3.1-pro-preview", 1),
-    ("v1beta", "gemini-3.6-flash", 1)
+    ("v1beta", "gemini-3.8-flash", 1)
 ]
 GLOBAL_TIMEOUT_SECONDS = 50
 PER_REQUEST_TIMEOUT = 20
