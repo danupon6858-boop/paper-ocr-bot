@@ -130,10 +130,10 @@ RESPONSE_SCHEMA = {
 }
 
 MODELS_CONFIG = [
-    ("v1beta", "gemini-2.0-flash", 1),
-    ("v1beta", "gemini-1.5-flash-8b", 1),
-    ("v1beta", "gemini-1.5-flash", 1),
-    ("v1beta", "gemini-1.5-pro", 1)
+    ("v1beta", "gemini-3.6-flash", 2),
+    ("v1beta", "gemini-3.6-pro", 1),
+    ("v1beta", "gemini-flash-latest", 1),
+    ("v1beta", "gemini-2.0-flash", 1)
 ]
 GLOBAL_TIMEOUT_SECONDS = 50
 PER_REQUEST_TIMEOUT = 20
@@ -349,9 +349,23 @@ def extract_from_file(file_path: str) -> dict:
     mime = "image/png" if file_path.lower().endswith(".png") else "image/jpeg"
     return extract_from_image(data, mime)
 
+def list_gemini_models() -> list:
+    if not API_KEY or not str(API_KEY).strip():
+        return []
+    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={API_KEY}"
+    req = urllib.request.Request(url)
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            return [m.get("name", "").replace("models/", "") for m in data.get("models", [])]
+    except Exception as e:
+        return [f"Error: {e}"]
+
 def test_gemini_connection() -> dict:
     if not API_KEY or not str(API_KEY).strip():
         return {"status": "error", "message": "GEMINI_API_KEY is not set"}
+    
+    available = list_gemini_models()
     
     dummy_png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
     test_payload = {
@@ -390,6 +404,7 @@ def test_gemini_connection() -> dict:
                     "working_model": f"{api_ver}/{model_name}",
                     "latency_ms": latency_ms,
                     "response": text.strip()[:100],
+                    "available_models": available,
                     "all_attempts": attempts
                 }
         except urllib.error.HTTPError as e:
@@ -401,5 +416,6 @@ def test_gemini_connection() -> dict:
     return {
         "status": "failed",
         "error": "All models failed ping test",
+        "available_models": available,
         "attempts": attempts
     }
