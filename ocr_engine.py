@@ -6,26 +6,41 @@ import urllib.request
 import urllib.error
 from config import GEMINI_API_KEY as API_KEY
 
-SYSTEM_PROMPT = """คุณคือ AI ผู้เชี่ยวชาญด้านการถอดลายมือภาษาไทยและตัวเลขจากเอกสารบันทึกข้อมูล
-หน้าที่ของคุณคืออ่านข้อมูลในกระดาษแล้วแปลงเป็น JSON ตามโครงสร้างที่กำหนดอย่างเคร่งครัด 100%
+SYSTEM_PROMPT = """คุณคือ AI ผู้เชี่ยวชาญระดับสูงสุดด้านการถอดลายมือภาษาไทยและตัวเลขจากเอกสารบันทึกข้อมูล
+หน้าที่ของคุณคืออ่านข้อมูลในกระดาษอย่างละเอียดถี่ถ้วน และแปลงเป็นโครงสร้าง JSON ตามที่กำหนดอย่างเคร่งครัด 100%
 
-โครงสร้างข้อมูลในแต่ละรายการ:
-- แต่ละรายการจะประกอบด้วย:
-  1. set1 (ชุดที่ 1): ตัวเลขล้วน (2-4 หลัก) เช่น 401, 370, 690, 377, 450, 12, 43, 68, 19
-  2. set3 (ชุดที่ 3): ตัวอักษร "ก" คู่กับเลข 3 หรือ 6 เท่านั้น (คือ "ก3" หรือ "ก6") หากไม่มีให้ใส่ string ว่าง ""
-  3. set2 (ชุดที่ 2): ตัวเลขเดี่ยว (เช่น 12, 24, 80) หรือ ตัวเลข x ตัวเลข (เช่น 120x120, 36x36, 12x12, 24x24)
-- กฎเหล็กสำคัญมาก:
-  * ถ้ามี set3 (ก3 หรือ ก6) -> set2 จะต้องเป็นตัวเลขเดี่ยวเท่านั้นเสมอ (เช่น "12") จะไม่มีเครื่องหมาย x
-  * ตัวคั่นระหว่างชุดที่ 1 กับชุดที่ 2 อาจเขียนเป็น '=', '-', หรือ ',' ให้ถอดเฉพาะค่าของ set1, set3, set2
-- แยกหมวดหมู่ตามหัวคอลัมน์:
-  * "บน" (เช่น ฝั่งซ้าย หรือตามหัวข้อ "บน")
-  * "ล่าง" (เช่น ฝั่งขวา หรือตามหัวข้อ "ล่าง")
-  * "บนล่าง" (ถ้ามี)
-- สำคัญมาก: ต้องสแกนอ่านให้ครบทุกคอลัมน์ทั่วทั้งแผ่น (ทั้งฝั่งซ้ายและฝั่งขวา) ห้ามมองข้ามคอลัมน์ใดคอลัมน์หนึ่ง
-- หากมีข้อมูลหัวเอกสาร เช่น ชื่อลูกค้า/พนักงาน, วันที่, ใบที่ ให้สกัดออกมาด้วย (ถ้าไม่มีให้ใส่ "")
-- ข้อกำหนดสำหรับภาพที่อ่านยากหรือไม่ชัด:
-  * ให้อ่านเฉพาะรายการที่เห็นตัวเลขชัดเจน ส่วนที่เบลอหรืออ่านไม่ออกให้ข้ามไป
-  * ห้ามตอบข้อความบรรยาย คำอธิบาย หรือข้อความอื่นนอกเหนือจากรูปแบบ JSON อย่างเด็ดขาด
+=======================================================
+1. ลำดับการกวาดสายตา (SPATIAL SCANNING ORDER) — สำคัญที่สุด:
+=======================================================
+- กฎเหล็ก: ห้ามอ่านกวาดสายตาตามแนวนอนข้ามระหว่างคอลัมน์เด็ดขาด (ห้ามดึงตัวเลขจากคอลัมน์ขวามาต่อท้ายหรือปนกับคอลัมน์ซ้าย)
+- ต้องอ่านทีละคอลัมน์แนวดิ่งตามลำดับนี้:
+  1. หัวกระดาษ: สกัด sheet_id (เลขที่ใบ), customer_name (ชื่อลูกค้า/พนักงาน), date (วันที่)
+  2. คอลัมน์ "บน" (มักอยู่ฝั่งซ้ายของกระดาษ): ให้อ่านไล่จากแถวบนสุดลงมาทีละแถวจนถึงแถวล่างสุดของฝั่งซ้าย ห้ามมองข้ามไปฝั่งขวา
+  3. คอลัมน์ "ล่าง" (มักอยู่ฝั่งขวาของกระดาษ): ให้อ่านไล่จากแถวบนสุดลงมาทีละแถวจนถึงแถวล่างสุดของฝั่งขวา
+  4. คอลัมน์ "บนล่าง" (ถ้ามีระบุหัวข้อชัดเจน หรืออยู่โซนพิเศษ)
+- หากกระดาษมีเพียงคอลัมน์เดียว หรือมีตัวเลขน้อย ให้อ่านตามลำดับบรรทัดจากบนลงล่างตามปกติ
+
+=======================================================
+2. โครงสร้างและการแยกคู่ตัวเลข (NUMBER-PRICE EXTRACTION):
+=======================================================
+แต่ละรายการประกอบด้วย:
+- set1 (ชุดที่ 1): ตัวเลขหวย 2-4 หลัก (เช่น 401, 370, 605, 12, 43, 68, 19)
+- set3 (ชุดที่ 3): รหัสพิเศษ "ก3" หรือ "ก6" เท่านั้น (ถ้าไม่มีให้ใส่ "")
+- set2 (ชุดที่ 2): ยอดเงิน สามารถเป็นเลขเดี่ยว (เช่น 12, 100) หรือ NxN (เช่น 120x120, 200x300, 36x36, 50x50, 5x5)
+
+กฎเหล็ก:
+- ถ้ามี set3 (ก3 หรือ ก6) -> set2 จะต้องเป็นตัวเลขเดี่ยวเท่านั้นเสมอ (เช่น "12") จะไม่มีเครื่องหมาย x
+- ตัวคั่นระหว่าง set1 และ set2 อาจเขียนเป็น '=', '-', ':', '/', หรือแค่เว้นวรรค (space) ให้แยกตัวเลขหวยกับยอดเงินออกจากกันให้ถูกต้อง
+- หากในบรรทัดเดียวกันมีตัวเลขหลายคู่ (เช่น "605=200 609=100" หรือ "12-20, 34-30") ให้แยกออกเป็นคนละรายการใน Array ทันที ห้ามรวมกันในชุดเดียว
+
+=======================================================
+3. กฎสำหรับภาพหนาแน่น หรือลายมือเขียนชิดกัน (HIGH-DENSITY SHEETS):
+=======================================================
+- หากตัวเลขเขียนติดหรือเบียดกัน ให้เพ่งดูลายเส้นปากกาแยกแต่ละหลักอย่างอิสระ
+- หากหางตัวเลขบรรทัดบนลากมาแตะหัวเลขบรรทัดล่าง ให้อ่านแยกแถวกันตามระดับบรรทัด
+- หากพบตัวเลขไทย (๑-๙) ให้แปลงเป็นเลขอารบิก (1-9)
+- หากมีรายการที่เบลอจนอ่านไม่ออก ให้ข้ามเฉพาะจุดนั้นไป และอ่านรายการอื่นๆ ให้ครบถ้วน
+- ห้ามตอบข้อความบรรยายเด็ดขาด ให้ส่งออกเป็น JSON ที่สมบูรณ์ตาม Schema เสมอ
 """
 
 RESPONSE_SCHEMA = {
@@ -129,6 +144,66 @@ def clean_and_parse_json(text: str) -> dict:
             
     raise ValueError(f"Could not parse valid JSON from text: {text[:100]}")
 
+THAI_DIGITS_TABLE = str.maketrans("๑๒๓๔๕๖๗๘๙๐", "1234567890")
+
+def auto_repair_extracted_data(ocr_result: dict) -> dict:
+    if not isinstance(ocr_result, dict):
+        return ocr_result
+        
+    columns = ocr_result.get("columns", {})
+    if not isinstance(columns, dict):
+        return ocr_result
+        
+    repaired_cols = {}
+    for col_key in ["top", "bottom", "top_bottom"]:
+        items = columns.get(col_key, [])
+        new_items = []
+        for itm in items:
+            if not isinstance(itm, dict):
+                continue
+                
+            s1 = str(itm.get("set1", "")).translate(THAI_DIGITS_TABLE).strip()
+            s2 = str(itm.get("set2", "")).translate(THAI_DIGITS_TABLE).strip()
+            s3 = str(itm.get("set3", "")).strip()
+            raw = str(itm.get("raw_text", "")).strip()
+            
+            # Check if s1 contains an embedded price (e.g. s1="401=120")
+            if "=" in s1 and not s2:
+                p = s1.split("=", 1)
+                s1 = p[0].strip()
+                s2 = p[1].strip()
+                
+            # Repeatedly split dense pairs written on the same line (e.g. "50x50 377=12 450=30")
+            curr_s1 = s1
+            curr_s2 = s2
+            curr_s3 = s3
+            
+            while True:
+                m = re.search(r"^(\d+(?:[xX]\d+)?)\s*[,;/ ]+\s*(\d{2,4})\s*[=\-:/ ]\s*(.+)$", curr_s2)
+                if m:
+                    first_s2 = m.group(1).replace("X", "x").strip()
+                    next_s1 = m.group(2).strip()
+                    next_s2 = m.group(3).strip()
+                    new_items.append({"set1": curr_s1, "set2": first_s2, "set3": curr_s3, "raw_text": f"{curr_s1} = {first_s2}"})
+                    curr_s1 = next_s1
+                    curr_s2 = next_s2
+                    curr_s3 = ""
+                else:
+                    final_s2 = curr_s2.replace("X", "x").replace(" ", "").rstrip(",.-;/ ")
+                    # Check if s3 is in final_s2 (e.g. "ก312")
+                    if not curr_s3:
+                        m_s3 = re.search(r"(ก3|ก6)", final_s2)
+                        if m_s3:
+                            curr_s3 = m_s3.group(1)
+                            final_s2 = final_s2.replace(curr_s3, "").strip()
+                    new_items.append({"set1": curr_s1, "set2": final_s2, "set3": curr_s3, "raw_text": raw or f"{curr_s1} = {final_s2}"})
+                    break
+                    
+        repaired_cols[col_key] = new_items
+        
+    ocr_result["columns"] = repaired_cols
+    return ocr_result
+
 def extract_from_image(image_bytes: bytes, mime_type: str = "image/jpeg") -> dict:
     img_b64 = base64.b64encode(image_bytes).decode("utf-8")
     
@@ -186,7 +261,8 @@ def extract_from_image(image_bytes: bytes, mime_type: str = "image/jpeg") -> dic
                         raise ValueError("Empty content parts in Gemini response")
                     
                     text = parts[0].get("text", "")
-                    return clean_and_parse_json(text)
+                    parsed = clean_and_parse_json(text)
+                    return auto_repair_extracted_data(parsed)
             except urllib.error.HTTPError as e:
                 last_exception = e
                 err_body = e.read().decode("utf-8", errors="ignore") if hasattr(e, "read") else ""
