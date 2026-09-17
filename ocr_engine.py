@@ -1,8 +1,11 @@
 import json
 import base64
+import time
 import urllib.request
 import urllib.error
-from config import GEMINI_API_KEY as API_KEY, MODEL
+from config import GEMINI_API_KEY as API_KEY
+
+MODELS_FALLBACK = ["gemini-3.6-flash", "gemini-flash-latest", "gemini-3.5-flash"]
 
 SYSTEM_PROMPT = """คุณคือ AI ผู้เชี่ยวชาญด้านการถอดลายมือภาษาไทยและตัวเลขจากเอกสารบันทึกข้อมูล
 หน้าที่ของคุณคืออ่านข้อมูลในกระดาษแล้วแปลงเป็น JSON ตามโครงสร้างที่กำหนดอย่างเคร่งครัด 100%
@@ -90,7 +93,6 @@ RESPONSE_SCHEMA = {
 
 def extract_from_image(image_bytes: bytes, mime_type: str = "image/jpeg") -> dict:
     img_b64 = base64.b64encode(image_bytes).decode("utf-8")
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL}:generateContent?key={API_KEY}"
     
     payload = {
         "system_instruction": {
@@ -116,16 +118,40 @@ def extract_from_image(image_bytes: bytes, mime_type: str = "image/jpeg") -> dic
         }
     }
     
-    req = urllib.request.Request(
-        url,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"}
-    )
-    
-    with urllib.request.urlopen(req) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
-        text = data["candidates"][0]["content"]["parts"][0]["text"]
-        return json.loads(text)
+    payload_bytes = json.dumps(payload).encode("utf-8")
+    last_exception = None
+
+    # Retry loop with backoff and model fallback
+    for model_name in MODELS_FALLBACK:
+        for attempt in range(3):
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={API_KEY}"
+            req = urllib.request.Request(
+                url,
+                data=payload_bytes,
+                headers={"Content-Type": "application/json"}
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=45) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                    text = data["candidates"][0]["content"]["parts"][0]["text"]
+                    return json.loads(text)
+            except urllib.error.HTTPError as e:
+                last_exception = e
+                print(f"[{model_name}] HTTP Error {e.code} on attempt {attempt+1}: {e.reason}")
+                if e.code in [500, 502, 503, 504, 429]:
+                    time.sleep(1.5 * (attempt + 1))
+                    continue
+                else:
+                    break
+            except Exception as e:
+                last_exception = e
+                print(f"[{model_name}] Network error on attempt {attempt+1}: {e}")
+                time.sleep(1.5)
+                continue
+
+    if last_exception:
+        raise last_exception
+    raise RuntimeError("Unable to extract data from image after retries.")
 
 def extract_from_file(file_path: str) -> dict:
     with open(file_path, "rb") as f:
