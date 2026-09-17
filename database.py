@@ -49,7 +49,6 @@ def init_db():
     )
     """)
     
-    # Index for super fast Set 1 search
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_entries_set1 ON entries (set1)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sheets_date ON sheets (date_str)")
     
@@ -118,7 +117,6 @@ def save_document(ocr_data: Dict, val_data: Dict, image_path: str = "") -> int:
     return sheet_db_id
 
 def search_set1(numbers: List[str]) -> Dict[str, List[Dict]]:
-    """Search for Set 1 numbers across all saved sheets"""
     init_db()
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -167,47 +165,62 @@ def get_daily_summary(date_str: Optional[str] = None) -> Dict:
     }
 
 def export_csv(date_str: Optional[str] = None, output_path: Optional[str] = None) -> str:
-    """Exports entries formatted with columns: ใบที่, พนักงาน, วันที่, หมวด, ชุด 1, ชุด 3, ชุด 2, ข้อความดิบ, สถานะ"""
+    """
+    Exports in 'Option 1' vertical format:
+    Headers: ลำดับ | บน | ล่าง | บนล่าง
+    Items ordered vertically row by row.
+    """
     init_db()
     conn = get_db_connection()
     cursor = conn.cursor()
     
+    query = """
+    SELECT category, set1, set3, set2, raw_text
+    FROM entries
+    """
+    params = []
     if date_str:
-        cursor.execute("""
-        SELECT sheet_id, employee_name, date_str, category, set1, set3, set2, raw_text, is_valid, validation_error
-        FROM entries
-        WHERE date_str = ?
-        ORDER BY sheet_db_id ASC, id ASC
-        """, (date_str,))
-    else:
-        cursor.execute("""
-        SELECT sheet_id, employee_name, date_str, category, set1, set3, set2, raw_text, is_valid, validation_error
-        FROM entries
-        ORDER BY sheet_db_id ASC, id ASC
-        """)
+        query += " WHERE date_str = ?"
+        params.append(date_str)
         
+    query += " ORDER BY sheet_db_id ASC, id ASC"
+    cursor.execute(query, params)
     rows = cursor.fetchall()
     conn.close()
     
+    top_items = []
+    bot_items = []
+    topbot_items = []
+    
+    for r in rows:
+        cat = r["category"]
+        s1 = r["set1"].strip()
+        s2 = r["set2"].strip()
+        s3 = r["set3"].strip()
+        s3_part = f"{s3} " if s3 else ""
+        item_str = f"{s1} = {s3_part}{s2}".strip()
+        
+        if cat == "บน":
+            top_items.append(item_str)
+        elif cat == "ล่าง":
+            bot_items.append(item_str)
+        elif cat == "บนล่าง":
+            topbot_items.append(item_str)
+            
+    max_len = max(len(top_items), len(bot_items), len(topbot_items), 1)
+    
     if not output_path:
-        filename = f"report_{date_str.replace('/', '-') if date_str else 'all'}.csv"
+        filename = f"report_vertical_{date_str.replace('/', '-') if date_str else 'all'}.csv"
         output_path = os.path.join(os.path.dirname(__file__), filename)
         
     with open(output_path, "w", newline="", encoding="utf-8-sig") as f:
         writer = csv.writer(f)
-        writer.writerow(["ใบที่", "พนักงาน", "วันที่", "หมวด", "ชุดที่ 1", "ชุดที่ 3", "ชุดที่ 2", "ข้อความดิบ", "สถานะ"])
-        for r in rows:
-            status_str = "ถูกต้อง" if r["is_valid"] else f"ผิดพลาด ({r['validation_error']})"
-            writer.writerow([
-                r["sheet_id"],
-                r["employee_name"],
-                r["date_str"],
-                r["category"],
-                r["set1"],
-                r["set3"],
-                r["set2"],
-                r["raw_text"],
-                status_str
-            ])
+        writer.writerow(["ลำดับ", "บน", "ล่าง", "บนล่าง"])
+        for i in range(max_len):
+            row_num = i + 1
+            top_val = top_items[i] if i < len(top_items) else ""
+            bot_val = bot_items[i] if i < len(bot_items) else ""
+            topbot_val = topbot_items[i] if i < len(topbot_items) else ""
+            writer.writerow([row_num, top_val, bot_val, topbot_val])
             
     return output_path
