@@ -130,10 +130,14 @@ RESPONSE_SCHEMA = {
 }
 
 MODELS_CONFIG = [
-    ("v1beta", "gemini-3.6-flash", 2),
-    ("v1beta", "gemini-3.7-flash", 1),
-    ("v1beta", "gemini-2.5-flash", 1),
-    ("v1beta", "gemini-2.5-pro", 1)
+    ("v1beta", "gemini-flash-latest", 1),
+    ("v1beta", "gemini-flash-lite-latest", 1),
+    ("v1beta", "gemini-3.5-flash", 1),
+    ("v1beta", "gemini-3.5-flash-lite", 1),
+    ("v1beta", "gemini-3.8-flash", 1),
+    ("v1beta", "gemini-pro-latest", 1),
+    ("v1beta", "gemini-3.1-pro-preview", 1),
+    ("v1beta", "gemini-3.6-flash", 1)
 ]
 GLOBAL_TIMEOUT_SECONDS = 50
 PER_REQUEST_TIMEOUT = 20
@@ -395,7 +399,7 @@ def test_gemini_connection() -> dict:
             headers={"Content-Type": "application/json"}
         )
         try:
-            with urllib.request.urlopen(req, timeout=12) as resp:
+            with urllib.request.urlopen(req, timeout=8) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
                 latency_ms = int((time.time() - t0) * 1000)
                 text = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
