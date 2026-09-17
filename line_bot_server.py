@@ -5,6 +5,7 @@ import hashlib
 import base64
 import urllib.request
 import urllib.error
+import urllib.parse
 import re
 import os
 from config import LINE_CHANNEL_SECRET, LINE_CHANNEL_ACCESS_TOKEN, OWNER_USER_ID
@@ -24,11 +25,19 @@ def verify_line_signature(body_bytes: bytes, signature: str) -> bool:
     ).decode('utf-8')
     return hmac.compare_digest(gen_sig, signature)
 
-def reply_line_message(reply_token: str, text: str):
+def reply_line_message(reply_token: str, text: str, quick_reply_items: list = None):
     url = "https://api.line.me/v2/bot/message/reply"
+    msg_obj = {"type": "text", "text": text}
+    if quick_reply_items:
+        msg_obj["quickReply"] = {
+            "items": [
+                {"type": "action", "action": {"type": "message", "label": label, "text": text_val}}
+                for label, text_val in quick_reply_items
+            ]
+        }
     payload = {
         "replyToken": reply_token,
-        "messages": [{"type": "text", "text": text}]
+        "messages": [msg_obj]
     }
     req = urllib.request.Request(
         url,
@@ -87,6 +96,17 @@ def get_line_image_content(message_id: str) -> bytes:
         return resp.read()
 
 def handle_image_message(message_id: str, reply_token: str, user_id: str, user_info: dict):
+    # 1. Check Period Status
+    active_p = database.get_active_period()
+    if not active_p:
+        msg = (
+            "⛔️ ขออภัยครับ ขณะนี้ระบบปิดรับข้อมูล (ยังไม่เปิดงวดใหม่)\n"
+            "กรุณารอเจ้าของเปิดงวดก่อนส่งรูปครับ\n\n"
+            f"🌐 ตรวจสอบสถานะงวดได้ที่:\n{BASE_URL}"
+        )
+        reply_line_message(reply_token, msg)
+        return
+
     try:
         worker_code = user_info.get("worker_code", "A")
         emp_name = user_info.get("display_name", "พนักงาน")
@@ -109,9 +129,25 @@ def handle_image_message(message_id: str, reply_token: str, user_id: str, user_i
         ocr_result["header"]["sheet_id"] = formatted_sheet_id
         ocr_result["header"]["customer_name"] = emp_name
 
-        # Save to DB
-        sheet_id = database.save_document(ocr_result, val_result)
-        
+        # 2. Check Duplicate Sheet
+        is_dup, dup_msg = database.check_duplicate_sheet(
+            active_p["id"], formatted_sheet_id, val_result.get("validated_columns", {})
+        )
+        if is_dup:
+            dup_reply = (
+                f"⛔️ [ตรวจพบกระดาษซ้ำแผ่นเดียวกัน!]\n"
+                f"─────────────────────────\n"
+                f"{dup_msg}\n\n"
+                f"💡 ระบบระงับการบันทึกใบนี้ เพื่อป้องกันตัวเลขเบิ้ลครับ"
+            )
+            reply_line_message(reply_token, dup_reply)
+            return
+
+        # 3. Create Pending Scan
+        scan_id = database.create_pending_scan(
+            user_id, worker_code, emp_name, active_p["id"], formatted_sheet_id, ocr_result, val_result
+        )
+
         cols = val_result.get("validated_columns", {})
         top_items = cols.get("top", [])
         bot_items = cols.get("bottom", [])
@@ -119,13 +155,8 @@ def handle_image_message(message_id: str, reply_token: str, user_id: str, user_i
         total_items = len(top_items) + len(bot_items) + len(topbot_items)
         
         lines = []
-        if val_result.get("is_all_valid"):
-            lines.append(f"✅ บันทึกเรียบร้อย [ใบที่: {formatted_sheet_id}]")
-        else:
-            lines.append(f"⚠️ บันทึกแล้ว แต่พบจุดผิดสังเกต [ใบที่: {formatted_sheet_id}]:")
-            for err in val_result.get("errors", [])[:4]:
-                lines.append(f"  • {err}")
-                
+        lines.append(f"📋 ตรวจสอบข้อมูลก่อนบันทึก [ใบที่: {formatted_sheet_id}]")
+        lines.append(f"📌 ข้อมูลนี้จะถูกบันทึกลงใน: {active_p['name']}")
         lines.append("─────────────────────────")
         
         def format_item_list(items, title):
@@ -149,12 +180,18 @@ def handle_image_message(message_id: str, reply_token: str, user_id: str, user_i
             lines.extend(format_item_list(topbot_items, "บนล่าง"))
             
         lines.append("─────────────────────────")
-        lines.append(f"📊 รวมทั้งหมด: {total_items} รายการ")
-        lines.append(f"👤 ผู้ส่ง: {emp_name} (รหัส: {worker_code})")
+        lines.append(f"📊 รวมทั้งหมด: {total_items} รายการ | ผู้ส่ง: {emp_name} ({worker_code})")
         lines.append("")
-        lines.append(f"🌐 ดูกระดานสรุปสด: {BASE_URL}")
+        lines.append(f"👉 กรุณาเลือกการกระทำ:")
+        lines.append(f"• กดปุ่มด้านล่างเพื่อ 'ยืนยัน' หรือ 'ยกเลิก'")
+        lines.append(f"• หรือจิ้มแก้ไขตัวเลขในเว็บ: {BASE_URL}/edit/{scan_id}")
         
-        reply_line_message(reply_token, "\n".join(lines).strip())
+        quick_replies = [
+            (f"✅ ยืนยัน #{scan_id}", f"ยืนยัน {scan_id}"),
+            (f"❌ ยกเลิก #{scan_id}", f"ยกเลิก {scan_id}")
+        ]
+        
+        reply_line_message(reply_token, "\n".join(lines).strip(), quick_replies)
         
     except Exception as e:
         print(f"Error handling image: {e}")
@@ -162,7 +199,6 @@ def handle_image_message(message_id: str, reply_token: str, user_id: str, user_i
 
 def handle_owner_command(text: str, reply_token: str) -> bool:
     clean = text.strip()
-    # Check for approval commands: "อนุมัติ [ชื่อ/ID] [รหัส A/B/C]"
     m = re.match(r"^อนุมัติ\s+(\S+)\s+([A-Za-z0-9]+)$", clean)
     if m:
         target = m.group(1)
@@ -170,13 +206,11 @@ def handle_owner_command(text: str, reply_token: str) -> bool:
         updated = database.approve_user(target, code)
         if updated:
             reply_line_message(reply_token, f"✅ อนุมัติเรียบร้อย!\n👤 {updated['display_name']}\n🏷️ ได้รับรหัสพนักงาน: [{code}]")
-            # Notify the worker
             push_line_message(updated["user_id"], f"🎉 คุณได้รับการอนุมัติให้ใช้งานระบบแล้วครับ!\n🏷️ รหัสประจำตัวของคุณคือ: [{code}]\n💡 คุณสามารถเริ่มส่งรูปกระดาษบันทึกได้เลยครับ")
         else:
             reply_line_message(reply_token, f"❌ ไม่พบผู้ใช้งานที่ระบุ '{target}' ในระบบ")
         return True
         
-    # Check for block command: "บล็อก [ชื่อ/ID]"
     m_block = re.match(r"^บล็อก\s+(\S+)$", clean)
     if m_block:
         target = m_block.group(1)
@@ -185,6 +219,30 @@ def handle_owner_command(text: str, reply_token: str) -> bool:
             reply_line_message(reply_token, f"⛔️ ระงับสิทธิ์การใช้งานของ {blocked['display_name']} เรียบร้อยแล้ว")
         else:
             reply_line_message(reply_token, f"❌ ไม่พบผู้ใช้งานที่ระบุ '{target}'")
+        return True
+
+    # Owner Period controls
+    if clean == "ปิดงวด":
+        closed = database.close_active_period()
+        if closed:
+            reply_line_message(reply_token, f"🔴 ปิดงวด [{closed['name']}] เรียบร้อยแล้วครับ\nระบบจะไม่รับรูปใหม่จนกว่าจะเปิดงวด\n🌐 {BASE_URL}")
+        else:
+            reply_line_message(reply_token, f"⚠️ ขณะนี้ไม่มีงวดที่เปิดอยู่ครับ (ปิดอยู่แล้ว)\n🌐 {BASE_URL}")
+        return True
+
+    if clean in ["เปิดงวด", "เปิดงวดเดิม", "เปิดงวดเดิมต่อ"]:
+        reopened = database.reopen_latest_period()
+        if reopened:
+            reply_line_message(reply_token, f"🟢 เปิดรับข้อมูลต่อใน [{reopened['name']}] เรียบร้อยแล้วครับ\n🌐 {BASE_URL}")
+        else:
+            reply_line_message(reply_token, f"⚠️ ไม่พบงวดเดิมในระบบครับ กรุณาเปิดงวดใหม่\n🌐 {BASE_URL}")
+        return True
+
+    m_open_new = re.match(r"^เปิดงวดใหม่(?:\s+(.+))?$", clean)
+    if m_open_new:
+        custom_name = m_open_new.group(1)
+        new_p = database.open_new_period(custom_name)
+        reply_line_message(reply_token, f"🎉 เปิดงวดใหม่: [{new_p['name']}] เรียบร้อยแล้วครับ!\nพร้อมรับรูปเอกสารเข้าระบบแล้วครับ\n🌐 {BASE_URL}")
         return True
 
     return False
@@ -196,7 +254,60 @@ def handle_text_message(text: str, reply_token: str, user_id: str, is_owner: boo
     if is_owner and handle_owner_command(clean_text, reply_token):
         return
 
-    # 1. Search Query command: "เช็ค 310"
+    # 1. Confirm Pending Scan: "ยืนยัน 5" or "ยืนยัน"
+    m_conf = re.match(r"^ยืนยัน(?:\s+(\d+))?$", clean_text)
+    if m_conf:
+        scan_id_str = m_conf.group(1)
+        if scan_id_str:
+            confirmed = database.confirm_pending_scan(int(scan_id_str))
+        else:
+            conn = database.get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute("SELECT id FROM pending_scans WHERE user_id = ? AND status = 'PENDING' ORDER BY id DESC LIMIT 1", (user_id,))
+            row = cursor.fetchone()
+            conn.close()
+            confirmed = database.confirm_pending_scan(row["id"]) if row else None
+            
+        if confirmed:
+            active_p = database.get_active_period()
+            p_name = active_p["name"] if active_p else "งวดปัจจุบัน"
+            msg = (
+                f"✅ บันทึกเรียบร้อย [ใบที่: {confirmed['sheet_id']}]\n"
+                f"📌 บันทึกลงใน: [{p_name}]\n"
+                f"🌐 ดูกระดานสรุปสด: {BASE_URL}"
+            )
+            reply_line_message(reply_token, msg)
+        else:
+            reply_line_message(reply_token, "⚠️ ไม่พบรายการที่รอกดยืนยัน หรือรายการนี้ได้รับการบันทึกไปแล้วครับ")
+        return
+
+    # 2. Cancel Pending Scan: "ยกเลิก 5"
+    m_canc = re.match(r"^ยกเลิก(?:\s+(\d+))?$", clean_text)
+    if m_canc:
+        scan_id_str = m_canc.group(1)
+        if scan_id_str:
+            success = database.cancel_pending_scan(int(scan_id_str))
+        else:
+            conn = database.get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute("SELECT id FROM pending_scans WHERE user_id = ? AND status = 'PENDING' ORDER BY id DESC LIMIT 1", (user_id,))
+            row = cursor.fetchone()
+            conn.close()
+            success = database.cancel_pending_scan(row["id"]) if row else False
+            
+        if success:
+            reply_line_message(reply_token, "🗑️ ยกเลิกข้อมูลเรียบร้อยครับ สามารถถ่ายรูปใหม่ได้เลยครับ")
+        else:
+            reply_line_message(reply_token, "⚠️ ไม่พบรายการที่รอยกเลิกครับ")
+        return
+
+    # 3. Audit report: "รีเช็ค", "audit", "ตรวจงาน"
+    if clean_text in ["รีเช็ค", "audit", "ตรวจงาน", "ตรวจ"]:
+        audit_msg = query_service.format_audit_report()
+        reply_line_message(reply_token, audit_msg)
+        return
+
+    # 4. Search Query command: "เช็ค 310"
     if clean_text.startswith("เช็ค") or clean_text.lower().startswith("check"):
         numbers = re.findall(r"\d+", clean_text)
         if not numbers:
@@ -206,21 +317,22 @@ def handle_text_message(text: str, reply_token: str, user_id: str, is_owner: boo
         reply_line_message(reply_token, result_msg)
         return
         
-    # 2. Status / Summary command
+    # 5. Status command
     if clean_text in ["สถานะ", "status", "ยอด", "สรุป", "ตาราง", "dashboard"]:
         status_msg = query_service.format_daily_status()
         status_msg += f"\n\n🌐 ดูกระดานสรุป Real-Time:\n{BASE_URL}"
         reply_line_message(reply_token, status_msg)
         return
         
-    # 3. Help menu
+    # 6. Help menu
     if clean_text in ["เมนู", "menu", "help", "?"]:
         help_msg = (
             "📋 เมนูการใช้งานระบบ\n"
             "─────────────────────────\n"
-            "1️⃣ ส่งรูปกระดาษ ➔ ระบบอ่านและบันทึกข้อมูล\n"
-            "2️⃣ พิมพ์ 'เช็ค [เลข]' ➔ ค้นหาเลขชุดที่ 1\n"
-            "3️⃣ พิมพ์ 'สรุป' ➔ ดูยอดรวมและลิงก์ตารางสรุปสด\n"
+            "1️⃣ ส่งรูปกระดาษ ➔ ระบบอ่านและส่งตัวเลขให้กดยืนยัน\n"
+            "2️⃣ พิมพ์ 'เช็ค [เลข]' ➔ ค้นหาเลขชุดที่ 1 ในงวดนี้\n"
+            "3️⃣ พิมพ์ 'รีเช็ค' ➔ ตรวจสอบลำดับเลขแผ่นและแผ่นที่ตกหล่น\n"
+            "4️⃣ พิมพ์ 'สถานะ' ➔ ดูยอดรวมและสถานะงวด\n"
         )
         if is_owner:
             help_msg += (
@@ -229,24 +341,118 @@ def handle_text_message(text: str, reply_token: str, user_id: str, is_owner: boo
                 "• 'อนุมัติ [ชื่อ] [รหัส A/B/C]' เพื่อเปิดสิทธิ์ให้พนักงาน\n"
                 "• 'บล็อก [ชื่อ]' เพื่อตัดสิทธิ์\n"
             )
-        help_msg += f"─────────────────────────\n🌐 ตารางสรุปสด:\n{BASE_URL}"
+        help_msg += f"─────────────────────────\n🌐 ตารางสรุปสดและเปิดปิดงวด:\n{BASE_URL}"
         reply_line_message(reply_token, help_msg)
         return
         
     reply_line_message(
         reply_token,
-        f"💡 คุณสามารถถ่ายรูปกระดาษส่งเข้ามาได้เลยครับ\nหรือพิมพ์ 'เช็ค [ตัวเลข]' เพื่อค้นหา\nหรือพิมพ์ 'สรุป' เพื่อดูกระดานข้อมูลสด\n🌐 {BASE_URL}"
+        f"💡 คุณสามารถถ่ายรูปกระดาษส่งเข้ามาได้เลยครับ\nหรือพิมพ์ 'เช็ค [ตัวเลข]' เพื่อค้นหา\nหรือพิมพ์ 'รีเช็ค' เพื่อตรวจเช็กลำดับกระดาษ\n🌐 {BASE_URL}"
     )
 
-def render_html_dashboard() -> str:
-    summary = database.get_daily_summary()
+# ==================== WEB DASHBOARD & QUICK-EDITOR ====================
+def render_edit_page(scan_id: int) -> str:
+    scan = database.get_pending_scan(scan_id)
+    if not scan:
+        return "<h3>❌ ไม่พบรายการนี้ หรือรายการนี้ถูกบันทึกไปแล้ว</h3>"
+    if scan["status"] != "PENDING":
+        return f"<h3>⚠️ รายการนี้อยู่ในสถานะ '{scan['status']}' แล้ว ไม่สามารถแก้ไขซ้ำได้</h3>"
+        
+    val_data = json.loads(scan["val_json"])
+    cols = val_data.get("validated_columns", {})
+    sheet_id = scan["sheet_id"]
+    emp_name = scan["emp_name"]
+    
+    # Render interactive input boxes
+    def render_inputs(items, col_name, col_key):
+        h = f"<div class='section-title'>{col_name} ({len(items)} รายการ)</div>"
+        if not items:
+            h += "<div style='color:#94a3b8; margin-bottom:10px;'>ไม่มีรายการในหมวดนี้</div>"
+        for idx, itm in enumerate(items):
+            s1 = itm.get('set1', '')
+            s3 = itm.get('set3', '')
+            s2 = itm.get('set2', '')
+            h += f"""
+            <div class="row-box">
+                <span class="row-idx">#{idx+1}</span>
+                <input type="text" name="{col_key}_set1_{idx}" value="{s1}" placeholder="ชุด 1" class="inp-set1">
+                <span>=</span>
+                <input type="text" name="{col_key}_set3_{idx}" value="{s3}" placeholder="ก3/ก6" class="inp-set3">
+                <input type="text" name="{col_key}_set2_{idx}" value="{s2}" placeholder="ชุด 2" class="inp-set2">
+            </div>
+            """
+        return h
+
+    top_html = render_inputs(cols.get("top", []), "หมวด [ บน ]", "top")
+    bot_html = render_inputs(cols.get("bottom", []), "หมวด [ ล่าง ]", "bottom")
+    topbot_html = render_inputs(cols.get("top_bottom", []), "หมวด [ บนล่าง ]", "top_bottom")
+
+    html = f"""<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>แก้ไขตัวเลข - ใบที่ {sheet_id}</title>
+    <style>
+        * {{ box-sizing: border-box; font-family: -apple-system, BlinkMacSystemFont, "Prompt", "Segoe UI", Roboto, sans-serif; }}
+        body {{ background: #f1f5f9; padding: 12px; margin: 0; color: #1e293b; }}
+        .header {{ background: white; padding: 14px; border-radius: 12px; margin-bottom: 14px; border: 1px solid #e2e8f0; }}
+        .title {{ font-size: 18px; font-weight: 700; color: #0f172a; margin: 0; }}
+        .sub {{ font-size: 13px; color: #64748b; margin-top: 4px; }}
+        .section-title {{ font-weight: 700; font-size: 15px; margin: 16px 0 8px 0; color: #2563eb; }}
+        .row-box {{ background: white; padding: 10px; border-radius: 10px; margin-bottom: 8px; display: flex; align-items: center; gap: 6px; border: 1px solid #e2e8f0; }}
+        .row-idx {{ width: 30px; font-size: 13px; color: #94a3b8; font-weight: 600; }}
+        input {{ padding: 10px 8px; border: 1px solid #cbd5e1; border-radius: 8px; font-size: 16px; font-weight: 700; text-align: center; outline: none; }}
+        input:focus {{ border-color: #2563eb; background: #eff6ff; }}
+        .inp-set1 {{ width: 75px; }}
+        .inp-set3 {{ width: 65px; color: #d97706; }}
+        .inp-set2 {{ flex: 1; }}
+        .btn-save {{ width: 100%; background: #059669; color: white; padding: 15px; border-radius: 12px; font-size: 17px; font-weight: 700; border: none; margin-top: 20px; cursor: pointer; }}
+        .btn-cancel {{ width: 100%; background: #94a3b8; color: white; padding: 12px; border-radius: 12px; font-size: 15px; font-weight: 600; border: none; margin-top: 10px; cursor: pointer; text-align: center; text-decoration: none; display: block; }}
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1 class="title">✏️ แตะแก้ไขตัวเลข [ใบที่: {sheet_id}]</h1>
+        <div class="sub">ผู้ส่ง: {emp_name} | เอานิ้วจิ้มในช่องแล้วพิมพ์แก้ตัวเลขได้ทันที</div>
+    </div>
+
+    <form method="POST" action="/edit/{scan_id}">
+        {top_html}
+        {bot_html}
+        {topbot_html}
+        <button type="submit" class="btn-save">✅ บันทึกการแก้ไขและยืนยันข้อมูล</button>
+        <a href="https://line.me" class="btn-cancel">กลับไปที่ LINE</a>
+    </form>
+</body>
+</html>
+"""
+    return html
+
+def render_html_dashboard(period_id: Optional[int] = None) -> str:
+    all_periods = database.get_all_periods()
+    active_period = database.get_active_period()
+    latest_period = database.get_latest_period()
+    
+    # Determine which period to view
+    if period_id:
+        selected_p = next((p for p in all_periods if p["id"] == period_id), latest_period)
+    else:
+        selected_p = active_period or latest_period
+        
+    p_id = selected_p["id"] if selected_p else 1
+    p_name = selected_p["name"] if selected_p else "งวดปัจจุบัน"
+    p_is_open = (selected_p and selected_p.get("status") == "OPEN")
+
+    summary = database.get_daily_summary(p_id)
     conn = database.get_db_connection()
     cursor = conn.cursor()
     cursor.execute("""
     SELECT category, set1, set3, set2, is_valid
     FROM entries
+    WHERE period_id = ?
     ORDER BY sheet_db_id ASC, id ASC
-    """)
+    """, (p_id,))
     rows = cursor.fetchall()
     conn.close()
 
@@ -287,25 +493,77 @@ def render_html_dashboard() -> str:
             </tr>
             """
     else:
-        table_rows_html = "<tr><td colspan='4' style='text-align:center; padding:40px; color:#94a3b8;'>ยังไม่มีข้อมูล ส่งรูปถ่ายผ่าน LINE เข้ามาได้เลยครับ</td></tr>"
+        table_rows_html = f"<tr><td colspan='4' style='text-align:center; padding:40px; color:#94a3b8;'>ยังไม่มีข้อมูลใน {p_name} ส่งรูปถ่ายผ่าน LINE เข้ามาได้เลยครับ</td></tr>"
+
+    # Period Toggle Button
+    if p_is_open:
+        period_control_html = f"""
+        <div class="period-banner banner-open">
+            <div>
+                <span class="status-indicator dot-open"></span>
+                <strong>🟢 สถานะ: กำลังเปิดรับข้อมูล</strong> — {p_name}
+            </div>
+            <form method="POST" action="/api/period/toggle" style="margin:0;">
+                <input type="hidden" name="action" value="close">
+                <button type="submit" class="btn-toggle btn-close-period" onclick="return confirm('คุณต้องการปิดงวดนี้ใช่หรือไม่? (หลังจากปิด ระบบจะไม่รับรูปอีก)')">🔴 ปิดงวดนี้</button>
+            </form>
+        </div>
+        """
+    else:
+        period_control_html = f"""
+        <div class="period-banner banner-closed">
+            <div>
+                <span class="status-indicator dot-closed"></span>
+                <strong>🔴 สถานะ: ปิดรับข้อมูลชั่วคราว</strong> — {p_name}
+            </div>
+            <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+                <form method="POST" action="/api/period/toggle" style="margin:0;">
+                    <input type="hidden" name="action" value="reopen">
+                    <button type="submit" class="btn-toggle btn-open-period">🟢 เปิดงวดเดิมต่อ (รับข้อมูลต่อ)</button>
+                </form>
+                <form method="POST" action="/api/period/toggle" style="margin:0;" onsubmit="let name = prompt('กรุณาตั้งชื่องวดใหม่ (เว้นว่างไว้เพื่อใช้วันที่วันนี้):'); if(name === null) return false; document.getElementById('new_p_name').value = name;">
+                    <input type="hidden" name="action" value="new">
+                    <input type="hidden" name="period_name" id="new_p_name" value="">
+                    <button type="submit" class="btn-toggle" style="background:#2563eb; color:white;">➕ เริ่มเปิดงวดใหม่</button>
+                </form>
+            </div>
+        </div>
+        """
+
+    # Period Dropdown Options
+    period_options_html = ""
+    for p in all_periods:
+        sel = "selected" if p["id"] == p_id else ""
+        st_tag = " (เปิด)" if p["status"] == "OPEN" else " (ปิดแล้ว)"
+        period_options_html += f"<option value='{p['id']}' {sel}>{p['name']}{st_tag}</option>"
 
     html = f"""<!DOCTYPE html>
 <html lang="th">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ระบบกระดานสรุปข้อมูล Real-Time</title>
+    <title>กระดานสรุปตัวเลข Real-Time</title>
     <meta http-equiv="refresh" content="15">
     <style>
         * {{ box-sizing: border-box; font-family: -apple-system, BlinkMacSystemFont, "Prompt", "Segoe UI", Roboto, sans-serif; }}
         body {{ background: #f8fafc; color: #1e293b; margin: 0; padding: 16px; }}
-        .header {{ display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; margin-bottom: 20px; }}
+        .header {{ display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; margin-bottom: 16px; }}
         .title {{ font-size: 22px; font-weight: 700; color: #0f172a; margin: 0; }}
-        .live-tag {{ background: #dcfce7; color: #15803d; padding: 4px 10px; border-radius: 999px; font-size: 13px; font-weight: 600; display: inline-flex; align-items: center; gap: 6px; }}
-        .live-dot {{ width: 8px; height: 8px; background: #22c55e; border-radius: 50%; display: inline-block; animation: pulse 1.5s infinite; }}
-        @keyframes pulse {{ 0% {{ opacity: 1; }} 50% {{ opacity: 0.3; }} 100% {{ opacity: 1; }} }}
         
-        .stats-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 12px; margin-bottom: 20px; }}
+        .period-banner {{ padding: 14px 18px; border-radius: 12px; margin-bottom: 16px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; }}
+        .banner-open {{ background: #dcfce7; border: 1px solid #bbf7d0; color: #166534; }}
+        .banner-closed {{ background: #fee2e2; border: 1px solid #fecaca; color: #991b1b; }}
+        .status-indicator {{ width: 10px; height: 10px; border-radius: 50%; display: inline-block; margin-right: 6px; }}
+        .dot-open {{ background: #22c55e; }}
+        .dot-closed {{ background: #ef4444; }}
+        .btn-toggle {{ padding: 9px 16px; border-radius: 8px; font-weight: 700; font-size: 14px; border: none; cursor: pointer; }}
+        .btn-close-period {{ background: #dc2626; color: white; }}
+        .btn-open-period {{ background: #16a34a; color: white; }}
+
+        .toolbar {{ display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 16px; }}
+        .period-select {{ padding: 10px 14px; border: 1px solid #cbd5e1; border-radius: 10px; font-size: 14px; font-weight: 600; background: white; }}
+
+        .stats-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 12px; margin-bottom: 20px; }}
         .stat-card {{ background: white; border: 1px solid #e2e8f0; border-radius: 12px; padding: 14px; text-align: center; box-shadow: 0 1px 3px rgba(0,0,0,0.05); }}
         .stat-num {{ font-size: 24px; font-weight: 800; color: #0f172a; margin-top: 4px; }}
         .stat-label {{ font-size: 12px; color: #64748b; font-weight: 600; text-transform: uppercase; }}
@@ -314,7 +572,6 @@ def render_html_dashboard() -> str:
         .search-input {{ flex: 1; padding: 12px 16px; border: 1px solid #cbd5e1; border-radius: 10px; font-size: 15px; outline: none; background: white; }}
         .search-input:focus {{ border-color: #2563eb; box-shadow: 0 0 0 3px rgba(37,99,235,0.1); }}
         .btn-export {{ background: #059669; color: white; border: none; padding: 12px 18px; border-radius: 10px; font-weight: 600; text-decoration: none; font-size: 14px; display: inline-flex; align-items: center; gap: 6px; cursor: pointer; white-space: nowrap; }}
-        .btn-export:hover {{ background: #047857; }}
 
         .table-container {{ background: white; border: 1px solid #e2e8f0; border-radius: 12px; overflow-x: auto; box-shadow: 0 1px 3px rgba(0,0,0,0.05); }}
         table {{ width: 100%; border-collapse: collapse; text-align: left; font-size: 15px; }}
@@ -324,23 +581,34 @@ def render_html_dashboard() -> str:
         th.th-topbot {{ color: #7c3aed; font-size: 16px; }}
         td {{ padding: 12px 18px; border-bottom: 1px solid #f1f5f9; }}
         tr:hover {{ background: #f8fafc; }}
-        .col-val {{ font-size: 15px; }}
-
         .footer-note {{ text-align: center; color: #94a3b8; font-size: 12px; margin-top: 20px; }}
     </style>
 </head>
 <body>
     <div class="header">
         <div>
-            <h1 class="title">📋 กระดานสรุปตัวเลข Real-Time (รูปแบบ 3 คอลัมน์)</h1>
-            <span class="live-tag"><span class="live-dot"></span> อัปเดตสดอัตโนมัติ (ทุก 15 วินาที)</span>
+            <h1 class="title">📋 กระดานสรุปตัวเลข Real-Time</h1>
+            <div style="font-size: 13px; color:#64748b; margin-top:4px;">ระบบบันทึกลายมืออัตโนมัติ 24 ชม.</div>
         </div>
-        <a href="/export" class="btn-export" download>📥 ดาวน์โหลดไฟล์ Excel (.CSV)</a>
+        <div style="display:flex; gap:8px;">
+            <a href="/export?period_id={p_id}" class="btn-export" download>📥 ดาวน์โหลด Excel (.CSV)</a>
+        </div>
+    </div>
+
+    {period_control_html}
+
+    <div class="toolbar">
+        <div>
+            <label style="font-size:13px; font-weight:700; color:#475569;">📁 เลือกดูงวด:</label>
+            <select class="period-select" onchange="window.location='/?period_id=' + this.value">
+                {period_options_html}
+            </select>
+        </div>
     </div>
 
     <div class="stats-grid">
         <div class="stat-card">
-            <div class="stat-label">เอกสารทั้งหมด</div>
+            <div class="stat-label">เอกสารงวดนี้</div>
             <div class="stat-num" style="color:#2563eb">{summary['total_sheets']} แผ่น</div>
         </div>
         <div class="stat-card">
@@ -362,7 +630,7 @@ def render_html_dashboard() -> str:
     </div>
 
     <div class="search-box">
-        <input type="text" id="searchInput" class="search-input" placeholder="🔍 พิมพ์ค้นหาตัวเลข เช่น 401, 370, 12..." onkeyup="filterTable()">
+        <input type="text" id="searchInput" class="search-input" placeholder="🔍 พิมพ์ค้นหาตัวเลขในงวดนี้ เช่น 401, 370, 12..." onkeyup="filterTable()">
     </div>
 
     <div class="table-container">
@@ -382,7 +650,7 @@ def render_html_dashboard() -> str:
     </div>
 
     <div class="footer-note">
-        💡 ระบบเชื่อมต่อกับ LINE Official Account: ส่งรูปถ่ายเพื่อเพิ่มข้อมูลได้ตลอด 24 ชั่วโมง
+        💡 ระบบเชื่อมต่อกับ LINE Official Account: พนักงานส่งรูปถ่ายได้เมื่อสถานะเป็น "กำลังเปิดรับข้อมูล"
     </div>
 
     <script>
@@ -407,8 +675,13 @@ def render_html_dashboard() -> str:
 
 class LineWebhookHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
-        if self.path == "/export":
-            csv_path = database.export_csv()
+        parsed = urllib.parse.urlparse(self.path)
+        path = parsed.path
+        qs = urllib.parse.parse_qs(parsed.query)
+
+        if path == "/export":
+            p_id = int(qs.get("period_id", [0])[0]) or None
+            csv_path = database.export_csv(p_id)
             self.send_response(200)
             self.send_header("Content-Type", "text/csv; charset=utf-8-sig")
             self.send_header("Content-Disposition", 'attachment; filename="report_all.csv"')
@@ -417,14 +690,88 @@ class LineWebhookHandler(http.server.BaseHTTPRequestHandler):
                 self.wfile.write(f.read())
             return
 
-        html_content = render_html_dashboard().encode('utf-8')
+        if path.startswith("/edit/"):
+            m = re.match(r"^/edit/(\d+)$", path)
+            if m:
+                scan_id = int(m.group(1))
+                html = render_edit_page(scan_id).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(html)
+                return
+
+        # Default: Dashboard
+        p_id = int(qs.get("period_id", [0])[0]) or None
+        html_content = render_html_dashboard(p_id).encode('utf-8')
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.end_headers()
         self.wfile.write(html_content)
 
     def do_POST(self):
-        if self.path != "/webhook":
+        parsed = urllib.parse.urlparse(self.path)
+        path = parsed.path
+
+        # 1. Period Toggle Form POST
+        if path == "/api/period/toggle":
+            content_length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_length).decode("utf-8")
+            form = urllib.parse.parse_qs(body)
+            action = form.get("action", [""])[0]
+            if action == "close":
+                database.close_active_period()
+            elif action == "reopen":
+                database.reopen_latest_period()
+            elif action == "new":
+                custom_name = form.get("period_name", [""])[0].strip()
+                database.open_new_period(custom_name if custom_name else None)
+            self.send_response(303)
+            self.send_header("Location", "/")
+            self.end_headers()
+            return
+
+        # 2. Quick Edit Save Form POST
+        if path.startswith("/edit/"):
+            m = re.match(r"^/edit/(\d+)$", path)
+            if m:
+                scan_id = int(m.group(1))
+                content_length = int(self.headers.get("Content-Length", 0))
+                body = self.rfile.read(content_length).decode("utf-8")
+                form = urllib.parse.parse_qs(body)
+                
+                # Reconstruct columns structure
+                new_columns = {"top": [], "bottom": [], "top_bottom": []}
+                for col_key, col_label in [("top", "บน"), ("bottom", "ล่าง"), ("top_bottom", "บนล่าง")]:
+                    idx = 0
+                    while True:
+                        s1_key = f"{col_key}_set1_{idx}"
+                        if s1_key not in form:
+                            break
+                        s1 = form.get(s1_key, [""])[0].strip()
+                        s3 = form.get(f"{col_key}_set3_{idx}", [""])[0].strip()
+                        s2 = form.get(f"{col_key}_set2_{idx}", [""])[0].strip()
+                        if s1 or s2:
+                            new_columns[col_key].append({
+                                "set1": s1,
+                                "set3": s3,
+                                "set2": s2,
+                                "raw_text": f"{s1} = {s3} {s2}".strip()
+                            })
+                        idx += 1
+                        
+                database.update_pending_scan_items(scan_id, new_columns)
+                confirmed = database.confirm_pending_scan(scan_id)
+                
+                success_html = """<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>บันทึกสำเร็จ</title><style>body{background:#f8fafc;font-family:sans-serif;padding:30px;text-align:center;}.card{background:white;padding:30px;border-radius:16px;max-width:400px;margin:auto;box-shadow:0 2px 5px rgba(0,0,0,0.1);}</style></head><body><div class="card"><h1 style="color:#16a34a;margin:0;">✅ บันทึกสำเร็จ!</h1><p style="color:#64748b;margin:15px 0;">ข้อมูลของคุณได้รับการแก้ไขและยืนยันเข้าระบบเรียบร้อยแล้ว</p><a href="https://line.me" style="display:inline-block;background:#06c755;color:white;padding:12px 24px;border-radius:10px;text-decoration:none;font-weight:700;">กลับไปที่ LINE</a></div></body></html>""".encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(success_html)
+                return
+
+        # 3. LINE Webhook POST
+        if path != "/webhook":
             self.send_response(404)
             self.end_headers()
             return
@@ -456,36 +803,28 @@ class LineWebhookHandler(http.server.BaseHTTPRequestHandler):
                 if not user_id:
                     continue
                     
-                # 1. Check User Security Status
                 user = database.get_user(user_id)
                 is_owner = (user_id == OWNER_USER_ID)
                 
                 if not is_owner:
                     if user is None:
-                        # New unknown user -> Register as PENDING and alert owner
                         display_name = get_line_profile(user_id)
                         database.register_pending_user(user_id, display_name)
-                        
-                        # Notify Owner
                         push_line_message(
                             OWNER_USER_ID,
                             f"🔔 มีผู้ขอเข้าใช้งานระบบใหม่!\n👤 ชื่อ: {display_name}\n🆔 ID: {user_id}\n\nพิมพ์สั่งอนุมัติได้เลยครับ เช่น:\n'อนุมัติ {display_name} A'\n'อนุมัติ {display_name} B'\nหรือ 'บล็อก {display_name}'"
                         )
-                        reply_line_message(reply_token, f"🔒 ขออภัยครับ บัญชีนี้เป็นระบบเฉพาะภายใน\nระบบได้ส่งคำขอไปยังเจ้าของระบบแล้ว กรุณารอการอนุมัติครับ")
+                        reply_line_message(reply_token, "🔒 ขออภัยครับ บัญชีนี้เป็นระบบเฉพาะภายใน\nระบบได้ส่งคำขอไปยังเจ้าของระบบแล้ว กรุณารอการอนุมัติครับ")
                         continue
-                        
                     elif user.get("status") == "PENDING":
                         reply_line_message(reply_token, "🔒 บัญชีของคุณอยู่ระหว่างรอเจ้าของระบบอนุมัติครับ กรุณารอสักครู่ครับ")
                         continue
-                        
                     elif user.get("status") == "BLOCKED":
-                        continue  # Silently ignore blocked users
+                        continue
 
-                # 2. Approved User / Owner -> Process events
                 if ev_type == "message":
                     msg = ev.get("message", {})
                     msg_type = msg.get("type")
-                    
                     if msg_type == "image":
                         handle_image_message(msg.get("id"), reply_token, user_id, user or {})
                     elif msg_type == "text":

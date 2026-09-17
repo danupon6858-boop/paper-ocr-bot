@@ -8,8 +8,8 @@ services:
       - key: PORT
         value: 10000
       - key: GEMINI_API_KEY
-        value: AQ.Ab8RN6Imw_2bc5XVUxA54u7hZMvmaDj8zTyHVEwo07SLk2u1nA
+        sync: false
       - key: LINE_CHANNEL_SECRET
-        value: 185987717ade027b657d31694033db85
+        sync: false
       - key: LINE_CHANNEL_ACCESS_TOKEN
-        value: vaJnOlD0NYATki2QwmbnWV4yXJNqzRHfWk8vZxhEYx6tvxS99mievWGfepC5ZmmposcIPaazxpMBIkYDsffs2WvDwKR8emUbL43LCgks+SA4y67KbM2YY7o1A2Ttu6AJdIp/ECtRn1hj6WgKrooAdgdB04t89/1O/w1cDnyilFU=
+        sync: false
