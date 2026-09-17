@@ -14,6 +14,7 @@ import database
 import query_service
 
 PORT = int(os.environ.get("PORT", 8080))
+BASE_URL = os.environ.get("RENDER_EXTERNAL_URL", "https://paper-ocr-bot.onrender.com")
 
 def verify_line_signature(body_bytes: bytes, signature: str) -> bool:
     if not signature:
@@ -61,28 +62,25 @@ def get_line_image_content(message_id: str) -> bytes:
 
 def handle_image_message(message_id: str, reply_token: str, user_id: str):
     try:
-        # 1. Download image
         print(f"Downloading image message {message_id}...")
         img_bytes = get_line_image_content(message_id)
         
-        # 2. Extract with Gemini
         print("Processing OCR with Gemini 3.6 Flash...")
         ocr_result = ocr_engine.extract_from_image(img_bytes)
         
-        # 3. Validate
         print("Validating rules...")
         val_result = OCRValidator.validate_document(ocr_result)
         
-        # 4. Save to DB
+        # Save to DB
         sheet_id = database.save_document(ocr_result, val_result)
         
-        # 5. Build response message
+        # Build line-by-line detailed response
         header = ocr_result.get("header", {})
         sheet_no = header.get("sheet_id") or f"แผ่นที่ #{sheet_id}"
         emp_name = header.get("customer_name") or "-"
         date_str = header.get("date") or "-"
         
-        cols = ocr_result.get("columns", {})
+        cols = val_result.get("validated_columns", {})
         top_items = cols.get("top", [])
         bot_items = cols.get("bottom", [])
         topbot_items = cols.get("top_bottom", [])
@@ -91,27 +89,45 @@ def handle_image_message(message_id: str, reply_token: str, user_id: str):
         
         lines = []
         if val_result.get("is_all_valid"):
-            lines.append("✅ บันทึกข้อมูลเรียบร้อย 100%")
+            lines.append(f"✅ บันทึกเรียบร้อย [ใบที่: {sheet_no}]")
         else:
-            lines.append("⚠️ อ่านข้อมูลได้ แต่พบจุดที่ต้องตรวจทาน:")
-            for err in val_result.get("errors", [])[:5]:
+            lines.append(f"⚠️ บันทึกแล้ว แต่พบจุดผิดสังเกต [ใบที่: {sheet_no}]:")
+            for err in val_result.get("errors", [])[:4]:
                 lines.append(f"  • {err}")
-            if len(val_result.get("errors", [])) > 5:
-                lines.append(f"  (และอีก {len(val_result.get('errors', [])) - 5} จุด)")
+            if len(val_result.get("errors", [])) > 4:
+                lines.append(f"  (และอีก {len(val_result.get('errors', [])) - 4} จุด)")
                 
         lines.append("─────────────────────────")
-        lines.append(f"📋 ใบที่: {sheet_no}")
-        if emp_name != "-":
-            lines.append(f"👤 ผู้บันทึก: {emp_name}")
-        if date_str != "-":
-            lines.append(f"📅 วันที่: {date_str}")
-        lines.append(f"📊 รายการทั้งหมด: {total_items} รายการ")
-        lines.append(f"  • บน: {len(top_items)} รายการ")
-        lines.append(f"  • ล่าง: {len(bot_items)} รายการ")
+        
+        # Helper to format item row
+        def format_item_list(items, title):
+            res = []
+            if items:
+                res.append(f"📌 หมวด [{title}] ({len(items)} รายการ):")
+                for idx, itm in enumerate(items, 1):
+                    s1 = itm.get('set1', '')
+                    s3 = f" {itm.get('set3')}" if itm.get('set3') else ""
+                    s2 = itm.get('set2', '')
+                    err_icon = " ❌" if not itm.get('is_valid') else ""
+                    res.append(f" {idx}. {s1} = {s3}{s2}{err_icon}")
+                res.append("")
+            return res
+
+        if top_items:
+            lines.extend(format_item_list(top_items, "บน"))
+        if bot_items:
+            lines.extend(format_item_list(bot_items, "ล่าง"))
         if topbot_items:
-            lines.append(f"  • บนล่าง: {len(topbot_items)} รายการ")
+            lines.extend(format_item_list(topbot_items, "บนล่าง"))
             
-        reply_line_message(reply_token, "\n".join(lines))
+        lines.append("─────────────────────────")
+        lines.append(f"📊 รวมทั้งหมด: {total_items} รายการ")
+        lines.append(f"👤 ผู้บันทึก: {emp_name} | 📅 วันที่: {date_str}")
+        lines.append("")
+        lines.append(f"🌐 ดูกระดานสรุปแบบ Real-Time:")
+        lines.append(f"{BASE_URL}")
+        
+        reply_line_message(reply_token, "\n".join(lines).strip())
         
     except Exception as e:
         print(f"Error handling image: {e}")
@@ -130,9 +146,10 @@ def handle_text_message(text: str, reply_token: str, user_id: str):
         reply_line_message(reply_token, result_msg)
         return
         
-    # 2. Status command
-    if clean_text in ["สถานะ", "status", "ยอด", "สรุป"]:
+    # 2. Status / Summary command
+    if clean_text in ["สถานะ", "status", "ยอด", "สรุป", "ตาราง", "dashboard"]:
         status_msg = query_service.format_daily_status()
+        status_msg += f"\n\n🌐 ดูกระดานสรุป Real-Time ได้ที่:\n{BASE_URL}"
         reply_line_message(reply_token, status_msg)
         return
         
@@ -141,11 +158,11 @@ def handle_text_message(text: str, reply_token: str, user_id: str):
         help_msg = (
             "📋 เมนูการใช้งานระบบ\n"
             "─────────────────────────\n"
-            "1️⃣ ส่งรูปถ่ายกระดาษ ➔ ระบบอ่านและบันทึกอัตโนมัติ\n"
-            "2️⃣ พิมพ์ 'เช็ค [เลข]' ➔ ค้นหาชุด 1 เช่น เช็ค 310 หรือ เช็ค 401 370\n"
-            "3️⃣ พิมพ์ 'สถานะ' ➔ ดูยอดรวมและใบที่เข้าระบบแล้ววันนี้\n"
+            "1️⃣ ส่งรูปกระดาษ ➔ ระบบอ่านและแจ้งรายการตัวเลขทุกแถวทันที\n"
+            "2️⃣ พิมพ์ 'เช็ค [เลข]' ➔ ค้นหา เช่น เช็ค 310 หรือ เช็ค 401 370\n"
+            "3️⃣ พิมพ์ 'สรุป' หรือ 'สถานะ' ➔ ดูยอดรวมและลิงก์ตารางสรุปสด\n"
             "─────────────────────────\n"
-            "💡 พนักงานส่งรูปถ่ายเข้ามาได้เลยครับ"
+            f"🌐 ลิงก์ตารางสรุปสด:\n{BASE_URL}"
         )
         reply_line_message(reply_token, help_msg)
         return
@@ -153,15 +170,192 @@ def handle_text_message(text: str, reply_token: str, user_id: str):
     # Default message
     reply_line_message(
         reply_token,
-        "💡 คุณสามารถส่งรูปกระดาษบันทึกเข้ามาได้เลยครับ\nหรือพิมพ์ 'เช็ค [ตัวเลข]' เพื่อค้นหาข้อมูล\n(พิมพ์ 'เมนู' เพื่อดูคำสั่งทั้งหมด)"
+        f"💡 คุณสามารถถ่ายรูปกระดาษส่งเข้ามาได้เลยครับ\nหรือพิมพ์ 'เช็ค [ตัวเลข]' เพื่อค้นหา\nหรือพิมพ์ 'สรุป' เพื่อดูกระดานข้อมูลสด\n🌐 {BASE_URL}"
     )
+
+def render_html_dashboard() -> str:
+    summary = database.get_daily_summary()
+    conn = database.get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+    SELECT e.sheet_id, e.employee_name, e.date_str, e.category, e.set1, e.set3, e.set2, e.raw_text, e.is_valid, e.validation_error, s.id as sheet_id_num
+    FROM entries e
+    JOIN sheets s ON e.sheet_db_id = s.id
+    ORDER BY s.id DESC, e.id ASC
+    LIMIT 300
+    """)
+    rows = cursor.fetchall()
+    conn.close()
+
+    # Count categories
+    count_top = sum(1 for r in rows if r['category'] == 'บน')
+    count_bot = sum(1 for r in rows if r['category'] == 'ล่าง')
+    count_topbot = sum(1 for r in rows if r['category'] == 'บนล่าง')
+
+    table_rows_html = ""
+    for r in rows:
+        status_badge = '<span class="badge badge-success">✓ ถูกต้อง</span>' if r['is_valid'] else f'<span class="badge badge-error">⚠️ {r["validation_error"]}</span>'
+        cat_badge = f'<span class="badge badge-cat">{r["category"]}</span>'
+        set3_text = f'<strong style="color:#d97706">{r["set3"]}</strong>' if r["set3"] else "-"
+        table_rows_html += f"""
+        <tr class="entry-row" data-set1="{r['set1']}" data-sheet="{r['sheet_id']}">
+            <td><strong style="color:#2563eb">ใบที่ {r['sheet_id'] or '-'}</strong></td>
+            <td>{cat_badge}</td>
+            <td><span class="set1-tag">{r['set1']}</span></td>
+            <td>{set3_text}</td>
+            <td><strong>{r['set2']}</strong></td>
+            <td style="color:#64748b; font-size:12px">{r['raw_text']}</td>
+            <td>{status_badge}</td>
+            <td style="color:#64748b; font-size:12px">{r['employee_name'] or '-'}</td>
+            <td style="color:#64748b; font-size:12px">{r['date_str'] or '-'}</td>
+        </tr>
+        """
+
+    if not rows:
+        table_rows_html = "<tr><td colspan='9' style='text-align:center; padding:40px; color:#94a3b8;'>ยังไม่มีข้อมูล ส่งรูปถ่ายผ่าน LINE เข้ามาได้เลยครับ</td></tr>"
+
+    html = f"""<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ระบบกระดานสรุปข้อมูล Real-Time</title>
+    <!-- Auto refresh every 15 seconds -->
+    <meta http-equiv="refresh" content="15">
+    <style>
+        * {{ box-sizing: border-box; font-family: -apple-system, BlinkMacSystemFont, "Prompt", "Segoe UI", Roboto, sans-serif; }}
+        body {{ background: #f8fafc; color: #1e293b; margin: 0; padding: 16px; }}
+        .header {{ display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; margin-bottom: 20px; }}
+        .title {{ font-size: 22px; font-weight: 700; color: #0f172a; margin: 0; }}
+        .live-tag {{ background: #dcfce7; color: #15803d; padding: 4px 10px; border-radius: 999px; font-size: 13px; font-weight: 600; display: inline-flex; align-items: center; gap: 6px; }}
+        .live-dot {{ width: 8px; height: 8px; background: #22c55e; border-radius: 50%; display: inline-block; animation: pulse 1.5s infinite; }}
+        @keyframes pulse {{ 0% {{ opacity: 1; }} 50% {{ opacity: 0.3; }} 100% {{ opacity: 1; }} }}
+        
+        .stats-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 12px; margin-bottom: 20px; }}
+        .stat-card {{ background: white; border: 1px solid #e2e8f0; border-radius: 12px; padding: 14px; text-align: center; box-shadow: 0 1px 3px rgba(0,0,0,0.05); }}
+        .stat-num {{ font-size: 24px; font-weight: 800; color: #0f172a; margin-top: 4px; }}
+        .stat-label {{ font-size: 12px; color: #64748b; font-weight: 600; text-transform: uppercase; }}
+
+        .search-box {{ margin-bottom: 16px; display: flex; gap: 10px; }}
+        .search-input {{ flex: 1; padding: 12px 16px; border: 1px solid #cbd5e1; border-radius: 10px; font-size: 15px; outline: none; background: white; }}
+        .search-input:focus {{ border-color: #2563eb; box-shadow: 0 0 0 3px rgba(37,99,235,0.1); }}
+        .btn-export {{ background: #059669; color: white; border: none; padding: 12px 18px; border-radius: 10px; font-weight: 600; text-decoration: none; font-size: 14px; display: inline-flex; align-items: center; gap: 6px; cursor: pointer; white-space: nowrap; }}
+        .btn-export:hover {{ background: #047857; }}
+
+        .table-container {{ background: white; border: 1px solid #e2e8f0; border-radius: 12px; overflow-x: auto; box-shadow: 0 1px 3px rgba(0,0,0,0.05); }}
+        table {{ width: 100%; border-collapse: collapse; text-align: left; font-size: 14px; }}
+        th {{ background: #f1f5f9; padding: 12px 14px; font-weight: 700; color: #475569; border-bottom: 1px solid #e2e8f0; white-space: nowrap; }}
+        td {{ padding: 12px 14px; border-bottom: 1px solid #f1f5f9; white-space: nowrap; }}
+        tr:hover {{ background: #f8fafc; }}
+
+        .set1-tag {{ font-size: 16px; font-weight: 800; color: #1e293b; background: #e2e8f0; padding: 2px 8px; border-radius: 6px; }}
+        .badge {{ padding: 3px 8px; border-radius: 6px; font-size: 12px; font-weight: 600; display: inline-block; }}
+        .badge-cat {{ background: #eff6ff; color: #1d4ed8; }}
+        .badge-success {{ background: #dcfce7; color: #15803d; }}
+        .badge-error {{ background: #fee2e2; color: #b91c1c; }}
+        .footer-note {{ text-align: center; color: #94a3b8; font-size: 12px; margin-top: 20px; }}
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div>
+            <h1 class="title">📋 กระดานสรุปตัวเลข Real-Time</h1>
+            <span class="live-tag"><span class="live-dot"></span> อัปเดตสดอัตโนมัติ (ทุก 15 วินาที)</span>
+        </div>
+        <a href="/export" class="btn-export" download>📥 ดาวน์โหลดไฟล์ Excel (.CSV)</a>
+    </div>
+
+    <div class="stats-grid">
+        <div class="stat-card">
+            <div class="stat-label">เอกสารทั้งหมด</div>
+            <div class="stat-num" style="color:#2563eb">{summary['total_sheets']} แผ่น</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-label">รายการทั้งหมด</div>
+            <div class="stat-num" style="color:#059669">{summary['total_entries']} รายการ</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-label">หมวด "บน"</div>
+            <div class="stat-num">{count_top}</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-label">หมวด "ล่าง"</div>
+            <div class="stat-num">{count_bot}</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-label">หมวด "บนล่าง"</div>
+            <div class="stat-num">{count_topbot}</div>
+        </div>
+    </div>
+
+    <div class="search-box">
+        <input type="text" id="searchInput" class="search-input" placeholder="🔍 พิมพ์ค้นหาเลขชุดที่ 1 หรือเลขใบที่ได้ทันที เช่น 401, 377, 96/17..." onkeyup="filterTable()">
+    </div>
+
+    <div class="table-container">
+        <table id="dataTable">
+            <thead>
+                <tr>
+                    <th>ใบที่</th>
+                    <th>หมวด</th>
+                    <th>ชุดที่ 1</th>
+                    <th>ชุดที่ 3</th>
+                    <th>ชุดที่ 2</th>
+                    <th>ข้อความดิบ</th>
+                    <th>สถานะ</th>
+                    <th>ผู้บันทึก</th>
+                    <th>วันที่</th>
+                </tr>
+            </thead>
+            <tbody>
+                {table_rows_html}
+            </tbody>
+        </table>
+    </div>
+
+    <div class="footer-note">
+        💡 ระบบเชื่อมต่อกับ LINE Official Account: ส่งรูปถ่ายเพื่อเพิ่มข้อมูลได้ตลอด 24 ชั่วโมง
+    </div>
+
+    <script>
+        function filterTable() {{
+            var input = document.getElementById('searchInput');
+            var filter = input.value.toUpperCase();
+            var rows = document.getElementsByClassName('entry-row');
+            for (var i = 0; i < rows.length; i++) {{
+                var set1 = rows[i].getAttribute('data-set1') || '';
+                var sheet = rows[i].getAttribute('data-sheet') || '';
+                if (set1.toUpperCase().indexOf(filter) > -1 || sheet.toUpperCase().indexOf(filter) > -1) {{
+                    rows[i].style.display = "";
+                }} else {{
+                    rows[i].style.display = "none";
+                }}
+            }}
+        }}
+    </script>
+</body>
+</html>
+"""
+    return html
 
 class LineWebhookHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
+        if self.path == "/export":
+            csv_path = database.export_csv()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/csv; charset=utf-8-sig")
+            self.send_header("Content-Disposition", 'attachment; filename="report_realtime.csv"')
+            self.end_headers()
+            with open(csv_path, "rb") as f:
+                self.wfile.write(f.read())
+            return
+
+        # Render Dashboard on root '/' or '/dashboard'
+        html_content = render_html_dashboard().encode('utf-8')
         self.send_response(200)
-        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Type", "text/html; charset=utf-8")
         self.end_headers()
-        self.wfile.write(json.dumps({"status": "running", "service": "Paper-OCR-Bot"}).encode())
+        self.wfile.write(html_content)
 
     def do_POST(self):
         if self.path != "/webhook":
@@ -173,7 +367,6 @@ class LineWebhookHandler(http.server.BaseHTTPRequestHandler):
         body_bytes = self.rfile.read(content_length)
         signature = self.headers.get("X-Line-Signature", "")
         
-        # Verify signature
         if not verify_line_signature(body_bytes, signature):
             print("Invalid signature rejected!")
             self.send_response(403)
@@ -185,7 +378,6 @@ class LineWebhookHandler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b"OK")
         
-        # Process events
         try:
             payload = json.loads(body_bytes.decode('utf-8'))
             events = payload.get("events", [])
