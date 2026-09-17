@@ -161,8 +161,12 @@ def get_line_image_content(message_id: str) -> bytes:
         url,
         headers={"Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}"}
     )
-    with urllib.request.urlopen(req) as resp:
-        return resp.read()
+    try:
+        with urllib.request.urlopen(req) as resp:
+            return resp.read()
+    except urllib.error.HTTPError as e:
+        err_b = e.read().decode('utf-8', errors='ignore') if hasattr(e, 'read') else ''
+        raise RuntimeError(f"LINE Content API error ({e.code} {e.reason}): {err_b}")
 
 def format_clean_editable_text(sheet_num: str, columns: dict) -> str:
     lines = [f"ใบที่ {sheet_num}"]

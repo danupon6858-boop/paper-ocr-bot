@@ -222,6 +222,9 @@ def auto_repair_extracted_data(ocr_result: dict) -> dict:
     return ocr_result
 
 def extract_from_image(image_bytes: bytes, mime_type: str = "image/jpeg") -> dict:
+    if not API_KEY or not str(API_KEY).strip():
+        raise ValueError("ยังไม่ได้ตั้งค่า GEMINI_API_KEY ใน Render Environment Variables")
+
     img_b64 = base64.b64encode(image_bytes).decode("utf-8")
     
     payload = {
@@ -288,6 +291,14 @@ def extract_from_image(image_bytes: bytes, mime_type: str = "image/jpeg") -> dic
                     if time.time() - start_time + 1.5 < GLOBAL_TIMEOUT_SECONDS:
                         time.sleep(1.0)
                         continue
+                if e.code in [401, 403]:
+                    msg = "GEMINI_API_KEY ไม่ถูกต้องหรือหมดอายุ"
+                    try:
+                        ed = json.loads(err_body)
+                        msg = ed.get("error", {}).get("message", msg)
+                    except Exception:
+                        pass
+                    raise RuntimeError(f"Google Gemini Auth ({e.code}): {msg}")
                 break
             except Exception as e:
                 last_exception = e
