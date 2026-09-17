@@ -473,7 +473,7 @@ def handle_image_message(message_id: str, reply_token: str, user_id: str, user_i
         traceback.print_exc()
         print(f"Error handling image for {user_id}: {e}")
         err_type = type(e).__name__
-        err_detail = f" ({err_type}: {str(e)[:50]})" if str(e) else f" ({err_type})"
+        err_detail = f" ({err_type}: {str(e)[:100]})" if str(e) else f" ({err_type})"
         if "503" in str(e):
             err_msg = (
                 f"⚠️ เซิร์ฟเวอร์ AI มีผู้ใช้งานหนาแน่นชั่วคราว{err_detail}\n"
@@ -1040,11 +1040,23 @@ class LineWebhookHandler(http.server.BaseHTTPRequestHandler):
             import ocr_engine
             info = {
                 "status": "ok",
-                "version": "v1.4-v1-stable",
+                "version": "v1.5-gemini-2.0",
                 "primary_model": f"{ocr_engine.MODELS_CONFIG[0][0]}/{ocr_engine.MODELS_CONFIG[0][1]}",
-                "models": ocr_engine.MODELS_CONFIG
+                "models": ocr_engine.MODELS_CONFIG,
+                "api_key_configured": bool(ocr_engine.API_KEY),
+                "api_key_prefix": ocr_engine.API_KEY[:6] + "..." if ocr_engine.API_KEY else "none"
             }
             self.wfile.write(json.dumps(info).encode("utf-8"))
+            return
+
+        if path == "/test-gemini":
+            import ocr_engine
+            res = ocr_engine.test_gemini_connection()
+            status_code = 200 if res.get("status") == "success" else 500
+            self.send_response(status_code)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(res, indent=2).encode("utf-8"))
             return
 
         if path == "/export":

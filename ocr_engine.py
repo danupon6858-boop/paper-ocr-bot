@@ -4,7 +4,8 @@ import time
 import re
 import urllib.request
 import urllib.error
-from config import GEMINI_API_KEY as API_KEY
+from config import GEMINI_API_KEY as _RAW_KEY
+API_KEY = (_RAW_KEY or "").strip()
 
 SYSTEM_PROMPT = """คุณคือ AI ผู้เชี่ยวชาญระดับสูงสุดด้านการถอดลายมือภาษาไทยและตัวเลขจากเอกสารบันทึกข้อมูล
 หน้าที่ของคุณคืออ่านข้อมูลในกระดาษอย่างละเอียดถี่ถ้วน และแปลงเป็นโครงสร้าง JSON ตามที่กำหนดอย่างเคร่งครัด 100%
@@ -129,10 +130,10 @@ RESPONSE_SCHEMA = {
 }
 
 MODELS_CONFIG = [
-    ("v1", "gemini-1.5-flash", 2),
+    ("v1beta", "gemini-2.0-flash", 1),
+    ("v1beta", "gemini-1.5-flash-8b", 1),
     ("v1beta", "gemini-1.5-flash", 1),
-    ("v1beta", "gemini-2.5-flash", 1),
-    ("v1beta", "gemini-flash-latest", 1)
+    ("v1beta", "gemini-1.5-pro", 1)
 ]
 GLOBAL_TIMEOUT_SECONDS = 50
 PER_REQUEST_TIMEOUT = 20
@@ -274,6 +275,7 @@ def extract_from_image(image_bytes: bytes, mime_type: str = "image/jpeg") -> dic
     
     payload_bytes = json.dumps(payload).encode("utf-8")
     last_exception = None
+    last_error_body = ""
     start_time = time.time()
 
     # Retry loop with fast failover and strict global timeout
@@ -307,10 +309,11 @@ def extract_from_image(image_bytes: bytes, mime_type: str = "image/jpeg") -> dic
             except urllib.error.HTTPError as e:
                 last_exception = e
                 err_body = e.read().decode("utf-8", errors="ignore") if hasattr(e, "read") else ""
+                last_error_body = err_body
                 print(f"[{api_ver}/{model_name}] HTTP Error {e.code} on attempt {attempt+1}: {e.reason} - {err_body}")
                 if e.code in [500, 502, 503, 504, 429]:
                     if time.time() - start_time + 1.5 < GLOBAL_TIMEOUT_SECONDS:
-                        time.sleep(1.2 * (attempt + 1))
+                        time.sleep(1.0 * (attempt + 1))
                         continue
                 if e.code in [401, 403]:
                     msg = "GEMINI_API_KEY ไม่ถูกต้องหรือหมดอายุ"
@@ -331,14 +334,13 @@ def extract_from_image(image_bytes: bytes, mime_type: str = "image/jpeg") -> dic
 
     if last_exception:
         err_msg = str(last_exception)
-        if hasattr(last_exception, "read"):
+        if last_error_body:
             try:
-                eb = last_exception.read().decode("utf-8", errors="ignore")
-                ed = json.loads(eb)
-                err_msg = ed.get("error", {}).get("message", eb)
+                ed = json.loads(last_error_body)
+                err_msg = ed.get("error", {}).get("message", last_error_body)
             except Exception:
-                pass
-        raise RuntimeError(f"Google Gemini ({getattr(last_exception, 'code', 'Error')}): {err_msg[:90]}")
+                err_msg = last_error_body[:120]
+        raise RuntimeError(f"Google Gemini ({getattr(last_exception, 'code', 'Error')}): {err_msg[:120]}")
     raise RuntimeError("Unable to extract data from image after retries.")
 
 def extract_from_file(file_path: str) -> dict:
@@ -346,3 +348,58 @@ def extract_from_file(file_path: str) -> dict:
         data = f.read()
     mime = "image/png" if file_path.lower().endswith(".png") else "image/jpeg"
     return extract_from_image(data, mime)
+
+def test_gemini_connection() -> dict:
+    if not API_KEY or not str(API_KEY).strip():
+        return {"status": "error", "message": "GEMINI_API_KEY is not set"}
+    
+    dummy_png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+    test_payload = {
+        "contents": [
+            {
+                "parts": [
+                    {"text": "Ping test. Please reply with the word PONG"},
+                    {
+                        "inline_data": {
+                            "mime_type": "image/png",
+                            "data": dummy_png_b64
+                        }
+                    }
+                ]
+            }
+        ]
+    }
+    payload_bytes = json.dumps(test_payload).encode("utf-8")
+    attempts = []
+    
+    for api_ver, model_name, _ in MODELS_CONFIG:
+        t0 = time.time()
+        url = f"https://generativelanguage.googleapis.com/{api_ver}/models/{model_name}:generateContent?key={API_KEY}"
+        req = urllib.request.Request(
+            url,
+            data=payload_bytes,
+            headers={"Content-Type": "application/json"}
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=12) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                latency_ms = int((time.time() - t0) * 1000)
+                text = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+                return {
+                    "status": "success",
+                    "working_model": f"{api_ver}/{model_name}",
+                    "latency_ms": latency_ms,
+                    "response": text.strip()[:100],
+                    "all_attempts": attempts
+                }
+        except urllib.error.HTTPError as e:
+            err_b = e.read().decode("utf-8", errors="ignore") if hasattr(e, "read") else ""
+            attempts.append({"model": f"{api_ver}/{model_name}", "http_code": e.code, "error": err_b[:200]})
+        except Exception as e:
+            attempts.append({"model": f"{api_ver}/{model_name}", "error": str(e)[:200]})
+            
+    return {
+        "status": "failed",
+        "error": "All models failed ping test",
+        "attempts": attempts
+    }
