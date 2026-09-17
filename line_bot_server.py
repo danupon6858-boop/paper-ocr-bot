@@ -1109,7 +1109,7 @@ class LineWebhookHandler(http.server.BaseHTTPRequestHandler):
             import ocr_engine
             info = {
                 "status": "ok",
-                "version": "v2.0-flash-lite-stable",
+                "version": "v2.1-quick-approve",
                 "primary_model": f"{ocr_engine.MODELS_CONFIG[0][0]}/{ocr_engine.MODELS_CONFIG[0][1]}",
                 "models": ocr_engine.MODELS_CONFIG,
                 "api_key_configured": bool(ocr_engine.API_KEY),
