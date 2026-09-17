@@ -487,15 +487,73 @@ def register_pending_user(user_id: str, display_name: str) -> bool:
     conn.close()
     return is_new
 
-def approve_user(user_id_prefix: str, worker_code: str) -> Optional[Dict]:
+def get_next_worker_code() -> str:
     init_db()
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT * FROM users WHERE user_id LIKE ? OR user_id = ?", (f"%{user_id_prefix}%", user_id_prefix))
+    cursor.execute("SELECT worker_code FROM users WHERE status = 'APPROVED' AND role != 'owner'")
+    taken = {row["worker_code"] for row in cursor.fetchall() if row["worker_code"]}
+    conn.close()
+    for char in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
+        if char not in taken:
+            return char
+    return "A"
+
+def get_pending_users() -> List[Dict]:
+    init_db()
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM users WHERE status = 'PENDING' ORDER BY created_at DESC")
+    rows = [dict(r) for r in cursor.fetchall()]
+    conn.close()
+    return rows
+
+def set_owner(user_id: str, display_name: str = "เจ้าของระบบ") -> dict:
+    init_db()
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
     row = cursor.fetchone()
+    if row:
+        cursor.execute("UPDATE users SET role = 'owner', status = 'APPROVED', display_name = ? WHERE user_id = ?", (display_name, user_id))
+    else:
+        cursor.execute("INSERT INTO users (user_id, display_name, role, worker_code, status) VALUES (?, ?, 'owner', 'ADMIN', 'APPROVED')",
+                       (user_id, display_name))
+    conn.commit()
+    cursor.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
+    res = dict(cursor.fetchone())
+    conn.close()
+    return res
+
+def approve_user(identifier: str, worker_code: str) -> Optional[Dict]:
+    """Approves user by matching user_id, display_name, or pending queue."""
+    init_db()
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    clean_id = (identifier or "").strip()
+    if clean_id.lower().startswith("id:"):
+        clean_id = clean_id[3:].strip()
+        
+    row = None
+    if clean_id:
+        # 1. Match exact user_id or prefix
+        cursor.execute("SELECT * FROM users WHERE user_id = ? OR user_id LIKE ?", (clean_id, f"{clean_id}%"))
+        row = cursor.fetchone()
+        
+        # 2. Match display_name (case-insensitive / partial)
+        if not row:
+            cursor.execute("SELECT * FROM users WHERE LOWER(display_name) = LOWER(?) OR display_name LIKE ?", (clean_id, f"%{clean_id}%"))
+            row = cursor.fetchone()
+            
+    # 3. If still not found or identifier is empty/latest, pick the latest PENDING user
+    if not row:
+        cursor.execute("SELECT * FROM users WHERE status = 'PENDING' ORDER BY created_at DESC LIMIT 1")
+        row = cursor.fetchone()
+        
     if not row:
         conn.close()
         return None
+        
     u_id = row["user_id"]
     cursor.execute("""
     UPDATE users SET status = 'APPROVED', worker_code = ? WHERE user_id = ?
@@ -506,15 +564,30 @@ def approve_user(user_id_prefix: str, worker_code: str) -> Optional[Dict]:
     conn.close()
     return updated
 
-def block_user(user_id_prefix: str) -> Optional[Dict]:
+def block_user(identifier: str) -> Optional[Dict]:
     init_db()
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT * FROM users WHERE user_id LIKE ? OR user_id = ?", (f"%{user_id_prefix}%", user_id_prefix))
-    row = cursor.fetchone()
+    clean_id = (identifier or "").strip()
+    if clean_id.lower().startswith("id:"):
+        clean_id = clean_id[3:].strip()
+        
+    row = None
+    if clean_id:
+        cursor.execute("SELECT * FROM users WHERE user_id = ? OR user_id LIKE ?", (clean_id, f"{clean_id}%"))
+        row = cursor.fetchone()
+        if not row:
+            cursor.execute("SELECT * FROM users WHERE LOWER(display_name) = LOWER(?) OR display_name LIKE ?", (clean_id, f"%{clean_id}%"))
+            row = cursor.fetchone()
+            
+    if not row:
+        cursor.execute("SELECT * FROM users WHERE status = 'PENDING' ORDER BY created_at DESC LIMIT 1")
+        row = cursor.fetchone()
+        
     if not row:
         conn.close()
         return None
+        
     u_id = row["user_id"]
     cursor.execute("UPDATE users SET status = 'BLOCKED' WHERE user_id = ?", (u_id,))
     conn.commit()

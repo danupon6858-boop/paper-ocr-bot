@@ -496,23 +496,58 @@ def handle_image_message(message_id: str, reply_token: str, user_id: str, user_i
             )
         deliver_message(user_id, reply_token, err_msg)
 
-def handle_owner_command(text: str, reply_token: str) -> bool:
+def handle_owner_command(text: str, reply_token: str, user_id: str = "") -> bool:
     clean = text.strip()
-    m = re.match(r"^อนุมัติ\s+(\S+)\s+([A-Za-z0-9]+)$", clean)
-    if m:
-        target = m.group(1)
-        code = m.group(2).upper()
+    
+    if clean in ["รออนุมัติ", "รายชื่อรออนุมัติ", "ผู้ใช้งาน", "สมาชิก"]:
+        pendings = database.get_pending_users()
+        if not pendings:
+            reply_line_message(reply_token, "✅ ไม่มีผู้ใช้งานรอการอนุมัติในขณะนี้ครับ")
+            return True
+            
+        p_text = f"📋 [รายชื่อรอการอนุมัติ: {len(pendings)} ท่าน]\n─────────────────────────\n"
+        for idx, pu in enumerate(pendings[:5], 1):
+            p_text += f"{idx}. {pu['display_name']} (ID: {pu['user_id'][:8]}...)\n"
+            
+        next_c = database.get_next_worker_code()
+        latest_pu = pendings[0]
+        q_replies = [
+            (f"✅ อนุมัติ ({next_c})", f"อนุมัติ id:{latest_pu['user_id']} {next_c}"),
+            ("✅ อนุมัติ (A)", f"อนุมัติ id:{latest_pu['user_id']} A"),
+            ("✅ อนุมัติ (B)", f"อนุมัติ id:{latest_pu['user_id']} B"),
+            ("⛔️ บล็อก", f"บล็อก id:{latest_pu['user_id']}")
+        ]
+        deliver_message(user_id, reply_token, p_text + "\n👇 แตะปุ่มเพื่ออนุมัติคนล่าสุดได้เลยครับ:", q_replies)
+        return True
+
+    if clean.startswith("อนุมัติ"):
+        parts = clean.split()
+        if len(parts) == 1:
+            target = "latest"
+            code = database.get_next_worker_code()
+        elif len(parts) == 2:
+            arg = parts[1]
+            if len(arg) <= 3 and arg.isalnum():
+                target = "latest"
+                code = arg.upper()
+            else:
+                target = arg
+                code = database.get_next_worker_code()
+        else:
+            code = parts[-1].upper()
+            target = " ".join(parts[1:-1])
+            
         updated = database.approve_user(target, code)
         if updated:
             reply_line_message(reply_token, f"✅ อนุมัติเรียบร้อย!\n👤 {updated['display_name']}\n🏷️ ได้รับรหัสพนักงาน: [{code}]")
             push_line_message(updated["user_id"], f"🎉 คุณได้รับการอนุมัติให้ใช้งานระบบแล้วครับ!\n🏷️ รหัสประจำตัวของคุณคือ: [{code}]\n💡 คุณสามารถเริ่มส่งรูปกระดาษบันทึกได้เลยครับ")
         else:
-            reply_line_message(reply_token, f"❌ ไม่พบผู้ใช้งานที่ระบุ '{target}' ในระบบ")
+            reply_line_message(reply_token, f"❌ ไม่พบผู้ใช้งานที่รออนุมัติ หรือไม่พบชื่อ '{target}' ในระบบ")
         return True
         
-    m_block = re.match(r"^บล็อก\s+(\S+)$", clean)
-    if m_block:
-        target = m_block.group(1)
+    if clean.startswith("บล็อก"):
+        parts = clean.split()
+        target = " ".join(parts[1:]) if len(parts) > 1 else "latest"
         blocked = database.block_user(target)
         if blocked:
             reply_line_message(reply_token, f"⛔️ ระงับสิทธิ์การใช้งานของ {blocked['display_name']} เรียบร้อยแล้ว")
@@ -551,7 +586,7 @@ def handle_text_message(text: str, reply_token: str, user_id: str, is_owner: boo
     user_info = user_info or {}
     
     # 0. Owner Approval check
-    if is_owner and handle_owner_command(clean_text, reply_token):
+    if is_owner and handle_owner_command(clean_text, reply_token, user_id):
         return
 
     # 1. Confirm Pending Scan: "ยืนยัน 5" or "ยืนยัน"
@@ -849,6 +884,39 @@ def render_html_dashboard(period_id: Optional[int] = None) -> str:
     else:
         table_rows_html = f"<tr><td colspan='4' style='text-align:center; padding:40px; color:#94a3b8;'>ยังไม่มีข้อมูลใน {p_name} ส่งรูปถ่ายผ่าน LINE เข้ามาได้เลยครับ</td></tr>"
 
+    # Pending Users Approval Section
+    pending_users = database.get_pending_users()
+    pending_users_html = ""
+    if pending_users:
+        next_code = database.get_next_worker_code()
+        cards_html = ""
+        for pu in pending_users:
+            cards_html += f"""
+            <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px; background:white; padding:10px 14px; border-radius:8px; border:1px solid #fed7aa; margin-top:8px;">
+                <div>
+                    <strong style="color:#0f172a;">👤 {pu['display_name']}</strong> <span style="color:#64748b; font-size:12px;">(ID: {pu['user_id'][:10]}...)</span>
+                </div>
+                <div style="display:flex; gap:6px; align-items:center;">
+                    <form method="POST" action="/api/user/approve" style="margin:0; display:flex; gap:6px; align-items:center;">
+                        <input type="hidden" name="user_id" value="{pu['user_id']}">
+                        <label style="font-size:12px; font-weight:bold; color:#475569;">รหัส:</label>
+                        <input type="text" name="worker_code" value="{next_code}" style="width:45px; text-align:center; padding:5px; font-weight:bold; border:1px solid #cbd5e1; border-radius:6px;">
+                        <button type="submit" class="btn-toggle" style="background:#16a34a; color:white; padding:6px 12px; font-size:13px; cursor:pointer;">✅ อนุมัติ</button>
+                    </form>
+                    <form method="POST" action="/api/user/block" style="margin:0;">
+                        <input type="hidden" name="user_id" value="{pu['user_id']}">
+                        <button type="submit" class="btn-toggle" style="background:#dc2626; color:white; padding:6px 12px; font-size:13px; cursor:pointer;" onclick="return confirm('ยืนยันบล็อกผู้ใช้นี้?')">⛔️ บล็อก</button>
+                    </form>
+                </div>
+            </div>
+            """
+        pending_users_html = f"""
+        <div style="background:#fff7ed; border:1px solid #ffedd5; border-radius:12px; padding:14px; margin-bottom:16px;">
+            <div style="font-weight:bold; color:#c2410c; font-size:15px;">🔔 มีผู้ขอเข้าใช้งานรอการอนุมัติ ({len(pending_users)} ท่าน)</div>
+            {cards_html}
+        </div>
+        """
+
     # Period Toggle Button
     if p_is_open:
         period_control_html = f"""
@@ -949,6 +1017,7 @@ def render_html_dashboard(period_id: Optional[int] = None) -> str:
         </div>
     </div>
 
+    {pending_users_html}
     {period_control_html}
 
     <div class="toolbar">
@@ -1111,6 +1180,34 @@ class LineWebhookHandler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             return
 
+        # 1.5. User Approval Form POST
+        if path == "/api/user/approve":
+            content_length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_length).decode("utf-8")
+            form = urllib.parse.parse_qs(body)
+            uid = form.get("user_id", [""])[0].strip()
+            wcode = form.get("worker_code", ["A"])[0].strip().upper() or "A"
+            if uid:
+                updated = database.approve_user(uid, wcode)
+                if updated:
+                    push_line_message(updated["user_id"], f"🎉 คุณได้รับการอนุมัติให้ใช้งานระบบแล้วครับ!\n🏷️ รหัสประจำตัวของคุณคือ: [{wcode}]\n💡 คุณสามารถเริ่มส่งรูปกระดาษบันทึกได้เลยครับ")
+            self.send_response(303)
+            self.send_header("Location", "/")
+            self.end_headers()
+            return
+
+        if path == "/api/user/block":
+            content_length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_length).decode("utf-8")
+            form = urllib.parse.parse_qs(body)
+            uid = form.get("user_id", [""])[0].strip()
+            if uid:
+                database.block_user(uid)
+            self.send_response(303)
+            self.send_header("Location", "/")
+            self.end_headers()
+            return
+
         # 2. Quick Edit Save Form POST
         if path.startswith("/edit/"):
             m = re.match(r"^/edit/(\d+)$", path)
@@ -1184,17 +1281,47 @@ class LineWebhookHandler(http.server.BaseHTTPRequestHandler):
                     continue
                     
                 user = database.get_user(user_id)
-                is_owner = (user_id == OWNER_USER_ID)
+                is_owner = (user_id == OWNER_USER_ID) or (user and user.get("role") == "owner")
+                
+                # Check for claiming ownership if not already owner
+                if ev_type == "message":
+                    msg_obj = ev.get("message", {})
+                    if msg_obj.get("type") == "text":
+                        txt_clean = (msg_obj.get("text") or "").strip()
+                        if txt_clean in ["ฉันคือเจ้าของ", "owner", "admin 1234", "ตั้งเป็นเจ้าของ"]:
+                            display_name = get_line_profile(user_id)
+                            database.set_owner(user_id, display_name)
+                            reply_line_message(reply_token, f"👑 ยินดีต้อนรับครับ!\nระบบได้ตั้งค่าให้คุณ ({display_name}) เป็น [เจ้าของระบบ (Owner)] เรียบร้อยแล้วครับ!\n💡 คุณสามารถสั่ง 'อนุมัติ', 'ปิดงวด', 'เปิดงวด' ได้ทุกคำสั่งครับ")
+                            continue
                 
                 if not is_owner:
                     if user is None:
                         display_name = get_line_profile(user_id)
                         database.register_pending_user(user_id, display_name)
-                        push_line_message(
-                            OWNER_USER_ID,
-                            f"🔔 มีผู้ขอเข้าใช้งานระบบใหม่!\n👤 ชื่อ: {display_name}\n🆔 ID: {user_id}\n\nพิมพ์สั่งอนุมัติได้เลยครับ เช่น:\n'อนุมัติ {display_name} A'\n'อนุมัติ {display_name} B'\nหรือ 'บล็อก {display_name}'"
+                        next_code = database.get_next_worker_code()
+                        
+                        admin_msg = (
+                            f"🔔 [มีผู้ขอเข้าใช้งานระบบใหม่!]\n"
+                            f"👤 ชื่อ LINE: {display_name}\n"
+                            f"🆔 ID: {user_id}\n\n"
+                            f"💡 แตะปุ่มด้านล่างเพื่ออนุมัติได้ทันทีครับ:"
                         )
-                        reply_line_message(reply_token, "🔒 ขออภัยครับ บัญชีนี้เป็นระบบเฉพาะภายใน\nระบบได้ส่งคำขอไปยังเจ้าของระบบแล้ว กรุณารอการอนุมัติครับ")
+                        quick_replies = [
+                            (f"✅ อนุมัติ ({next_code})", f"อนุมัติ id:{user_id} {next_code}"),
+                            ("✅ อนุมัติ (A)", f"อนุมัติ id:{user_id} A"),
+                            ("✅ อนุมัติ (B)", f"อนุมัติ id:{user_id} B"),
+                            ("✅ อนุมัติ (C)", f"อนุมัติ id:{user_id} C"),
+                            ("⛔️ บล็อก", f"บล็อก id:{user_id}")
+                        ]
+                        seen = set()
+                        uniq_replies = []
+                        for lbl, val in quick_replies:
+                            if lbl not in seen:
+                                seen.add(lbl)
+                                uniq_replies.append((lbl, val))
+                                
+                        deliver_message(OWNER_USER_ID, None, admin_msg, uniq_replies)
+                        reply_line_message(reply_token, "🔒 ขออภัยครับ บัญชีนี้เป็นระบบเฉพาะภายใน\nระบบได้ส่งคำขอไปยังเจ้าของระบบแล้ว กรุณารอการอนุมัติสักครู่ครับ")
                         continue
                     elif user.get("status") == "PENDING":
                         reply_line_message(reply_token, "🔒 บัญชีของคุณอยู่ระหว่างรอเจ้าของระบบอนุมัติครับ กรุณารอสักครู่ครับ")
