@@ -8,6 +8,7 @@ import urllib.error
 import urllib.parse
 import re
 import os
+from typing import List, Dict, Optional, Tuple
 from config import LINE_CHANNEL_SECRET, LINE_CHANNEL_ACCESS_TOKEN, OWNER_USER_ID
 import ocr_engine
 from validator import OCRValidator
@@ -53,11 +54,19 @@ def reply_line_message(reply_token: str, text: str, quick_reply_items: list = No
     except Exception as e:
         print(f"Error sending LINE reply: {e}")
 
-def push_line_message(to_user_id: str, text: str):
+def push_line_message(to_user_id: str, text: str, quick_reply_items: list = None):
     url = "https://api.line.me/v2/bot/message/push"
+    msg_obj = {"type": "text", "text": text}
+    if quick_reply_items:
+        msg_obj["quickReply"] = {
+            "items": [
+                {"type": "action", "action": {"type": "message", "label": label, "text": text_val}}
+                for label, text_val in quick_reply_items
+            ]
+        }
     payload = {
         "to": to_user_id,
-        "messages": [{"type": "text", "text": text}]
+        "messages": [msg_obj]
     }
     req = urllib.request.Request(
         url,
@@ -72,6 +81,46 @@ def push_line_message(to_user_id: str, text: str):
             pass
     except Exception as e:
         print(f"Error sending LINE push: {e}")
+
+def push_line_messages(to_user_id: str, messages: list):
+    url = "https://api.line.me/v2/bot/message/push"
+    payload = {
+        "to": to_user_id,
+        "messages": messages
+    }
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode('utf-8'),
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}"
+        }
+    )
+    try:
+        with urllib.request.urlopen(req) as resp:
+            pass
+    except Exception as e:
+        print(f"Error sending LINE push messages: {e}")
+
+def send_line_loading_indicator(chat_id: str, loading_seconds: int = 20):
+    url = "https://api.line.me/v2/bot/chat/loading/start"
+    payload = {
+        "chatId": chat_id,
+        "loadingSeconds": min(loading_seconds, 60)
+    }
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode('utf-8'),
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}"
+        }
+    )
+    try:
+        with urllib.request.urlopen(req) as resp:
+            pass
+    except Exception as e:
+        print(f"Error sending loading indicator: {e}")
 
 def get_line_profile(user_id: str) -> str:
     url = f"https://api.line.me/v2/bot/profile/{user_id}"
@@ -95,6 +144,200 @@ def get_line_image_content(message_id: str) -> bytes:
     with urllib.request.urlopen(req) as resp:
         return resp.read()
 
+def format_clean_editable_text(sheet_num: str, columns: dict) -> str:
+    lines = [f"ใบที่ {sheet_num}"]
+    
+    top_items = columns.get("top", [])
+    if top_items:
+        lines.append("[บน]")
+        for itm in top_items:
+            s1 = itm.get("set1", "").strip()
+            s3 = itm.get("set3", "").strip()
+            s3_part = f"{s3} " if s3 else ""
+            s2 = itm.get("set2", "").strip()
+            lines.append(f"{s1} = {s3_part}{s2}".strip())
+        lines.append("")
+        
+    bot_items = columns.get("bottom", [])
+    if bot_items:
+        lines.append("[ล่าง]")
+        for itm in bot_items:
+            s1 = itm.get("set1", "").strip()
+            s3 = itm.get("set3", "").strip()
+            s3_part = f"{s3} " if s3 else ""
+            s2 = itm.get("set2", "").strip()
+            lines.append(f"{s1} = {s3_part}{s2}".strip())
+        lines.append("")
+        
+    topbot_items = columns.get("top_bottom", [])
+    if topbot_items:
+        lines.append("[บนล่าง]")
+        for itm in topbot_items:
+            s1 = itm.get("set1", "").strip()
+            s3 = itm.get("set3", "").strip()
+            s3_part = f"{s3} " if s3 else ""
+            s2 = itm.get("set2", "").strip()
+            lines.append(f"{s1} = {s3_part}{s2}".strip())
+        lines.append("")
+        
+    return "\n".join(lines).strip()
+
+def parse_entry_line(line: str) -> Optional[dict]:
+    line = line.strip()
+    if not line:
+        return None
+    parts = line.split("=", 1)
+    if len(parts) == 2:
+        s1 = parts[0].strip()
+        right = parts[1].strip()
+    else:
+        m = re.match(r"^(\d+)\s+(.+)$", line)
+        if m:
+            s1 = m.group(1).strip()
+            right = m.group(2).strip()
+        else:
+            if re.match(r"^\d{2,4}$", line):
+                return {"set1": line, "set2": "", "set3": "", "raw_text": line}
+            return None
+            
+    s3 = ""
+    s2 = right
+    m_s3 = re.search(r"(ก3|ก6)", right)
+    if m_s3:
+        s3 = m_s3.group(1)
+        s2 = right.replace(s3, "").strip()
+        
+    s2 = s2.replace("X", "x").replace(" ", "")
+    s3_part = f"{s3} " if s3 else ""
+    raw = f"{s1} = {s3_part}{s2}".strip()
+    return {"set1": s1, "set2": s2, "set3": s3, "raw_text": raw}
+
+def parse_sheet_text(text: str) -> Optional[dict]:
+    lines = [l.strip() for l in text.strip().split("\n") if l.strip()]
+    if not lines:
+        return None
+        
+    sheet_id = None
+    current_col = "top"
+    columns = {"top": [], "bottom": [], "top_bottom": []}
+    has_entries = False
+    
+    for line in lines:
+        m_sheet = re.match(r"^ใบที่(?:\s*[:\-]?\s*)([A-Za-z0-9\-_]+)", line)
+        if m_sheet:
+            sheet_id = m_sheet.group(1).strip()
+            continue
+            
+        line_clean = line.replace("[", "").replace("]", "").replace(":", "").strip()
+        if line_clean in ["บนล่าง", "หมวดบนล่าง", "หมวด บนล่าง"]:
+            current_col = "top_bottom"
+            continue
+        elif line_clean in ["บน", "หมวดบน", "หมวด บน"]:
+            current_col = "top"
+            continue
+        elif line_clean in ["ล่าง", "หมวดล่าง", "หมวด ล่าง"]:
+            current_col = "bottom"
+            continue
+            
+        entry = parse_entry_line(line)
+        if entry:
+            columns[current_col].append(entry)
+            has_entries = True
+            
+    if not has_entries:
+        return None
+        
+    return {"sheet_id": sheet_id, "columns": columns}
+
+def handle_delete_command(text: str, user_id: str, reply_token: str) -> bool:
+    m = re.match(r"^ลบ\s+(\d+)(?:[=\s].*)?$", text.strip())
+    if not m:
+        return False
+    target_num = m.group(1).strip()
+    
+    scan = database.get_latest_pending_scan(user_id)
+    if not scan:
+        reply_line_message(reply_token, "⚠️ ไม่พบรายการที่รอยืนยันอยู่ในขณะนี้ครับ")
+        return True
+        
+    val_data = json.loads(scan["val_json"])
+    cols = val_data.get("validated_columns", {})
+    
+    found = False
+    new_cols = {"top": [], "bottom": [], "top_bottom": []}
+    for c in ["top", "bottom", "top_bottom"]:
+        for itm in cols.get(c, []):
+            if itm.get("set1") == target_num and not found:
+                found = True
+                continue
+            new_cols[c].append(itm)
+            
+    if not found:
+        reply_line_message(reply_token, f"⚠️ ไม่พบเลข {target_num} ในใบที่ {scan['sheet_id']} ครับ")
+        return True
+        
+    database.update_pending_scan_items(scan["id"], new_cols)
+    clean_text = format_clean_editable_text(scan["sheet_id"], new_cols)
+    
+    msg_ack = f"🗑️ ลบเลข {target_num} ออกจากใบที่ {scan['sheet_id']} เรียบร้อยแล้วครับ!\n(หากถูกต้องแล้ว กด 'ยืนยัน' หรือคัดลอกข้อความด้านล่างไปแก้ไขต่อได้เลยครับ)"
+    quick_replies = [("✅ ยืนยัน", f"ยืนยัน {scan['id']}"), ("❌ ยกเลิก", f"ยกเลิก {scan['id']}")]
+    reply_line_message(reply_token, f"{msg_ack}\n\n{clean_text}", quick_replies)
+    return True
+
+def handle_edit_command(text: str, user_id: str, reply_token: str) -> bool:
+    m = re.match(r"^แก้\s+(\d+(?:[=\s][^\s]+)?)\s+เป็น\s+(.+)$", text.strip())
+    if not m:
+        return False
+    old_target = m.group(1).strip()
+    new_target = m.group(2).strip()
+    
+    scan = database.get_latest_pending_scan(user_id)
+    if not scan:
+        reply_line_message(reply_token, "⚠️ ไม่พบรายการที่รอยืนยันอยู่ในขณะนี้ครับ")
+        return True
+        
+    val_data = json.loads(scan["val_json"])
+    cols = val_data.get("validated_columns", {})
+    
+    old_s1 = old_target.split("=")[0].strip() if "=" in old_target else old_target.split()[0].strip()
+    parsed_new = parse_entry_line(new_target)
+    if not parsed_new:
+        reply_line_message(reply_token, f"❌ รูปแบบเลขใหม่ '{new_target}' ไม่ถูกต้อง (เช่น 375 หรือ 375=36x36)")
+        return True
+        
+    found = False
+    new_cols = {"top": [], "bottom": [], "top_bottom": []}
+    for c in ["top", "bottom", "top_bottom"]:
+        for itm in cols.get(c, []):
+            if itm.get("set1") == old_s1 and not found:
+                found = True
+                updated_itm = dict(itm)
+                if parsed_new["set2"]:
+                    updated_itm["set1"] = parsed_new["set1"]
+                    updated_itm["set2"] = parsed_new["set2"]
+                    updated_itm["set3"] = parsed_new["set3"]
+                    updated_itm["raw_text"] = parsed_new["raw_text"]
+                else:
+                    updated_itm["set1"] = parsed_new["set1"]
+                    s3 = updated_itm.get("set3", "")
+                    s3_p = f"{s3} " if s3 else ""
+                    s2 = updated_itm.get("set2", "")
+                    updated_itm["raw_text"] = f"{updated_itm['set1']} = {s3_p}{s2}".strip()
+                new_cols[c].append(updated_itm)
+            else:
+                new_cols[c].append(itm)
+                
+    if not found:
+        reply_line_message(reply_token, f"⚠️ ไม่พบเลข {old_s1} ในใบที่ {scan['sheet_id']} ครับ")
+        return True
+        
+    database.update_pending_scan_items(scan["id"], new_cols)
+    clean_text = format_clean_editable_text(scan["sheet_id"], new_cols)
+    msg_ack = f"✏️ แก้ไขเลข {old_s1} ในใบที่ {scan['sheet_id']} เรียบร้อยแล้วครับ!\n(หากถูกต้องแล้ว กด 'ยืนยัน' หรือคัดลอกข้อความด้านล่างไปแก้ไขต่อได้เลยครับ)"
+    quick_replies = [("✅ ยืนยัน", f"ยืนยัน {scan['id']}"), ("❌ ยกเลิก", f"ยกเลิก {scan['id']}")]
+    reply_line_message(reply_token, f"{msg_ack}\n\n{clean_text}", quick_replies)
+    return True
+
 def handle_image_message(message_id: str, reply_token: str, user_id: str, user_info: dict):
     # 1. Check Period Status
     active_p = database.get_active_period()
@@ -107,6 +350,10 @@ def handle_image_message(message_id: str, reply_token: str, user_id: str, user_i
         reply_line_message(reply_token, msg)
         return
 
+    # Immediately acknowledge image receipt and start typing indicator
+    reply_line_message(reply_token, "📥 ได้รับรูปภาพแล้วครับ ระบบกำลังประมวลผลอ่านตัวเลข... ⏳")
+    send_line_loading_indicator(user_id, 25)
+
     try:
         worker_code = user_info.get("worker_code", "A")
         emp_name = user_info.get("display_name", "พนักงาน")
@@ -117,6 +364,16 @@ def handle_image_message(message_id: str, reply_token: str, user_id: str, user_i
         print("Processing OCR with Gemini 3.6 Flash...")
         ocr_result = ocr_engine.extract_from_image(img_bytes)
         
+        # Check if any data extracted
+        raw_cols = ocr_result.get("columns", {}) if ocr_result else {}
+        total_raw = sum(len(items) for items in raw_cols.values())
+        if total_raw == 0:
+            push_line_message(
+                user_id,
+                "❌ ขออภัยครับ ภาพนี้ไม่ชัดเจน หรืออ่านตัวเลขไม่พบ\nกรุณาตรวจดูความสว่าง/ความคมชัด แล้วถ่ายรูปส่งใหม่อีกครั้งครับ 📷"
+            )
+            return
+
         print("Validating rules...")
         val_result = OCRValidator.validate_document(ocr_result)
         
@@ -125,7 +382,9 @@ def handle_image_message(message_id: str, reply_token: str, user_id: str, user_i
         if raw_sheet_id:
             formatted_sheet_id = f"{worker_code}-{raw_sheet_id}" if not raw_sheet_id.startswith(f"{worker_code}-") else raw_sheet_id
         else:
-            formatted_sheet_id = f"{worker_code}-N/A"
+            formatted_sheet_id = f"{worker_code}-1"
+            raw_sheet_id = "1"
+            
         ocr_result["header"]["sheet_id"] = formatted_sheet_id
         ocr_result["header"]["customer_name"] = emp_name
 
@@ -140,7 +399,7 @@ def handle_image_message(message_id: str, reply_token: str, user_id: str, user_i
                 f"{dup_msg}\n\n"
                 f"💡 ระบบระงับการบันทึกใบนี้ เพื่อป้องกันตัวเลขเบิ้ลครับ"
             )
-            reply_line_message(reply_token, dup_reply)
+            push_line_message(user_id, dup_reply)
             return
 
         # 3. Create Pending Scan
@@ -148,54 +407,41 @@ def handle_image_message(message_id: str, reply_token: str, user_id: str, user_i
             user_id, worker_code, emp_name, active_p["id"], formatted_sheet_id, ocr_result, val_result
         )
 
-        cols = val_result.get("validated_columns", {})
-        top_items = cols.get("top", [])
-        bot_items = cols.get("bottom", [])
-        topbot_items = cols.get("top_bottom", [])
+        valid_cols = val_result.get("validated_columns", {})
+        top_items = valid_cols.get("top", [])
+        bot_items = valid_cols.get("bottom", [])
+        topbot_items = valid_cols.get("top_bottom", [])
         total_items = len(top_items) + len(bot_items) + len(topbot_items)
         
-        lines = []
-        lines.append(f"📋 ตรวจสอบข้อมูลก่อนบันทึก [ใบที่: {formatted_sheet_id}]")
-        lines.append(f"📌 ข้อมูลนี้จะถูกบันทึกลงใน: {active_p['name']}")
-        lines.append("─────────────────────────")
+        # Message 1: Period, summary & Instructions
+        msg1_text = (
+            f"📌 ข้อมูลนี้จะถูกบันทึกลงใน: {active_p['name']}\n"
+            f"📋 อ่านข้อมูลได้ [ใบที่: {formatted_sheet_id}]\n"
+            f"📊 รวมทั้งหมด: {total_items} รายการ | ผู้ส่ง: {emp_name} ({worker_code})\n"
+            f"─────────────────────────\n"
+            f"✅ หากถูกต้องทั้งหมด: กดปุ่ม [ ยืนยัน ] ด้านล่างได้เลยครับ\n\n"
+            f"✏️ หากต้องการแก้ไข: สามารถก๊อปปี้ (Copy) ข้อความตัวเลขด้านล่างนี้ ไปลบหรือแก้ตัวเลข แล้วส่งกลับมาได้ทันทีครับ"
+        )
         
-        def format_item_list(items, title):
-            res = []
-            if items:
-                res.append(f"📌 หมวด [{title}] ({len(items)} รายการ):")
-                for idx, itm in enumerate(items, 1):
-                    s1 = itm.get('set1', '')
-                    s3 = f"{itm.get('set3')} " if itm.get('set3') else ""
-                    s2 = itm.get('set2', '')
-                    err_icon = " ❌" if not itm.get('is_valid') else ""
-                    res.append(f" {idx}. {s1} = {s3}{s2}{err_icon}".strip())
-                res.append("")
-            return res
-
-        if top_items:
-            lines.extend(format_item_list(top_items, "บน"))
-        if bot_items:
-            lines.extend(format_item_list(bot_items, "ล่าง"))
-        if topbot_items:
-            lines.extend(format_item_list(topbot_items, "บนล่าง"))
-            
-        lines.append("─────────────────────────")
-        lines.append(f"📊 รวมทั้งหมด: {total_items} รายการ | ผู้ส่ง: {emp_name} ({worker_code})")
-        lines.append("")
-        lines.append(f"👉 กรุณาเลือกการกระทำ:")
-        lines.append(f"• กดปุ่มด้านล่างเพื่อ 'ยืนยัน' หรือ 'ยกเลิก'")
-        lines.append(f"• หรือจิ้มแก้ไขตัวเลขในเว็บ: {BASE_URL}/edit/{scan_id}")
+        # Message 2: Clean editable text block
+        clean_text = format_clean_editable_text(raw_sheet_id, valid_cols)
         
         quick_replies = [
-            (f"✅ ยืนยัน #{scan_id}", f"ยืนยัน {scan_id}"),
-            (f"❌ ยกเลิก #{scan_id}", f"ยกเลิก {scan_id}")
+            {"type": "action", "action": {"type": "message", "label": "✅ ยืนยัน", "text": f"ยืนยัน {scan_id}"}},
+            {"type": "action", "action": {"type": "message", "label": "❌ ยกเลิก", "text": f"ยกเลิก {scan_id}"}}
         ]
         
-        reply_line_message(reply_token, "\n".join(lines).strip(), quick_replies)
+        msg2_obj = {
+            "type": "text",
+            "text": clean_text,
+            "quickReply": {"items": quick_replies}
+        }
+        
+        push_line_messages(user_id, [{"type": "text", "text": msg1_text}, msg2_obj])
         
     except Exception as e:
         print(f"Error handling image: {e}")
-        reply_line_message(reply_token, f"❌ ขออภัย ระบบอ่านภาพขัดข้อง: {e}\nกรุณาลองถ่ายภาพส่งใหม่อีกครั้งครับ")
+        push_line_message(user_id, f"❌ ขออภัย ระบบอ่านภาพขัดข้อง: {e}\nกรุณาลองถ่ายภาพส่งใหม่อีกครั้งครับ")
 
 def handle_owner_command(text: str, reply_token: str) -> bool:
     clean = text.strip()
@@ -247,8 +493,9 @@ def handle_owner_command(text: str, reply_token: str) -> bool:
 
     return False
 
-def handle_text_message(text: str, reply_token: str, user_id: str, is_owner: bool):
+def handle_text_message(text: str, reply_token: str, user_id: str, is_owner: bool, user_info: dict = None):
     clean_text = text.strip()
+    user_info = user_info or {}
     
     # 0. Owner Approval check
     if is_owner and handle_owner_command(clean_text, reply_token):
@@ -261,19 +508,16 @@ def handle_text_message(text: str, reply_token: str, user_id: str, is_owner: boo
         if scan_id_str:
             confirmed = database.confirm_pending_scan(int(scan_id_str))
         else:
-            conn = database.get_db_connection()
-            cursor = conn.cursor()
-            cursor.execute("SELECT id FROM pending_scans WHERE user_id = ? AND status = 'PENDING' ORDER BY id DESC LIMIT 1", (user_id,))
-            row = cursor.fetchone()
-            conn.close()
-            confirmed = database.confirm_pending_scan(row["id"]) if row else None
+            scan = database.get_latest_pending_scan(user_id)
+            confirmed = database.confirm_pending_scan(scan["id"]) if scan else None
             
         if confirmed:
             active_p = database.get_active_period()
             p_name = active_p["name"] if active_p else "งวดปัจจุบัน"
             msg = (
-                f"✅ บันทึกเรียบร้อย [ใบที่: {confirmed['sheet_id']}]\n"
-                f"📌 บันทึกลงใน: [{p_name}]\n"
+                f"✅ ยืนยันบันทึกข้อมูลเรียบร้อยแล้วครับ!\n"
+                f"📋 [ใบที่: {confirmed['sheet_id']}]\n"
+                f"📌 ข้อมูลถูกบันทึกลงใน: {p_name}\n\n"
                 f"🌐 ดูกระดานสรุปสด: {BASE_URL}"
             )
             reply_line_message(reply_token, msg)
@@ -281,19 +525,15 @@ def handle_text_message(text: str, reply_token: str, user_id: str, is_owner: boo
             reply_line_message(reply_token, "⚠️ ไม่พบรายการที่รอกดยืนยัน หรือรายการนี้ได้รับการบันทึกไปแล้วครับ")
         return
 
-    # 2. Cancel Pending Scan: "ยกเลิก 5"
+    # 2. Cancel Pending Scan: "ยกเลิก 5" or "ยกเลิก"
     m_canc = re.match(r"^ยกเลิก(?:\s+(\d+))?$", clean_text)
     if m_canc:
         scan_id_str = m_canc.group(1)
         if scan_id_str:
             success = database.cancel_pending_scan(int(scan_id_str))
         else:
-            conn = database.get_db_connection()
-            cursor = conn.cursor()
-            cursor.execute("SELECT id FROM pending_scans WHERE user_id = ? AND status = 'PENDING' ORDER BY id DESC LIMIT 1", (user_id,))
-            row = cursor.fetchone()
-            conn.close()
-            success = database.cancel_pending_scan(row["id"]) if row else False
+            scan = database.get_latest_pending_scan(user_id)
+            success = database.cancel_pending_scan(scan["id"]) if scan else False
             
         if success:
             reply_line_message(reply_token, "🗑️ ยกเลิกข้อมูลเรียบร้อยครับ สามารถถ่ายรูปใหม่ได้เลยครับ")
@@ -301,13 +541,21 @@ def handle_text_message(text: str, reply_token: str, user_id: str, is_owner: boo
             reply_line_message(reply_token, "⚠️ ไม่พบรายการที่รอยกเลิกครับ")
         return
 
-    # 3. Audit report: "รีเช็ค", "audit", "ตรวจงาน"
+    # 3. Single-item Delete: "ลบ 690"
+    if handle_delete_command(clean_text, user_id, reply_token):
+        return
+
+    # 4. Single-item Edit: "แก้ 370 เป็น 375"
+    if handle_edit_command(clean_text, user_id, reply_token):
+        return
+
+    # 5. Audit report: "รีเช็ค", "audit", "ตรวจงาน"
     if clean_text in ["รีเช็ค", "audit", "ตรวจงาน", "ตรวจ"]:
         audit_msg = query_service.format_audit_report()
         reply_line_message(reply_token, audit_msg)
         return
 
-    # 4. Search Query command: "เช็ค 310"
+    # 6. Search Query command: "เช็ค 310"
     if clean_text.startswith("เช็ค") or clean_text.lower().startswith("check"):
         numbers = re.findall(r"\d+", clean_text)
         if not numbers:
@@ -317,32 +565,85 @@ def handle_text_message(text: str, reply_token: str, user_id: str, is_owner: boo
         reply_line_message(reply_token, result_msg)
         return
         
-    # 5. Status command
+    # 7. Status command
     if clean_text in ["สถานะ", "status", "ยอด", "สรุป", "ตาราง", "dashboard"]:
         status_msg = query_service.format_daily_status()
         status_msg += f"\n\n🌐 ดูกระดานสรุป Real-Time:\n{BASE_URL}"
         reply_line_message(reply_token, status_msg)
         return
         
-    # 6. Help menu
+    # 8. Help menu
     if clean_text in ["เมนู", "menu", "help", "?"]:
         help_msg = (
             "📋 เมนูการใช้งานระบบ\n"
             "─────────────────────────\n"
-            "1️⃣ ส่งรูปกระดาษ ➔ ระบบอ่านและส่งตัวเลขให้กดยืนยัน\n"
-            "2️⃣ พิมพ์ 'เช็ค [เลข]' ➔ ค้นหาเลขชุดที่ 1 ในงวดนี้\n"
-            "3️⃣ พิมพ์ 'รีเช็ค' ➔ ตรวจสอบลำดับเลขแผ่นและแผ่นที่ตกหล่น\n"
-            "4️⃣ พิมพ์ 'สถานะ' ➔ ดูยอดรวมและสถานะงวด\n"
+            "1️⃣ ถ่ายรูปกระดาษส่งเข้ามา ➔ ระบบอ่านและส่งสรุปให้ตรวจ\n"
+            "2️⃣ ก๊อปปี้ข้อความตัวเลขไปแก้ไข/ลบ แล้วส่งกลับมา ➔ ระบบบันทึกทันที\n"
+            "3️⃣ หรือพิมพ์ 'ลบ [เลข]' / 'แก้ [เลขเดิม] เป็น [เลขใหม่]'\n"
+            "4️⃣ พิมพ์ 'เช็ค [เลข]' ➔ ค้นหาเลขชุดที่ 1 ในงวดนี้\n"
+            "5️⃣ พิมพ์ 'รีเช็ค' ➔ ตรวจสอบลำดับแผ่นและแผ่นที่ตกหล่น\n"
+            "6️⃣ พิมพ์ 'สถานะ' ➔ ดูยอดรวมและสถานะงวด\n"
         )
         if is_owner:
             help_msg += (
                 "─────────────────────────\n"
                 "👑 คำสั่งเจ้าของระบบ:\n"
+                "• 'ปิดงวด' / 'เปิดงวด' / 'เปิดงวดใหม่' เพื่อเปิด-ปิดงวด\n"
                 "• 'อนุมัติ [ชื่อ] [รหัส A/B/C]' เพื่อเปิดสิทธิ์ให้พนักงาน\n"
                 "• 'บล็อก [ชื่อ]' เพื่อตัดสิทธิ์\n"
             )
         help_msg += f"─────────────────────────\n🌐 ตารางสรุปสดและเปิดปิดงวด:\n{BASE_URL}"
         reply_line_message(reply_token, help_msg)
+        return
+
+    # 9. Check if Worker Pasted an Edited Sheet Text Block
+    parsed_sheet = parse_sheet_text(clean_text)
+    if parsed_sheet and any(len(items) > 0 for items in parsed_sheet["columns"].values()):
+        # Validate edited entries
+        val_result = OCRValidator.validate_document({"columns": parsed_sheet["columns"]})
+        if not val_result["is_all_valid"]:
+            err_lines = ["⚠️ ตัวเลขที่แก้ไขมีจุดที่ไม่ตรงตามกฎ:"]
+            for err in val_result["errors"][:5]:
+                err_lines.append(f"• {err}")
+            err_lines.append("\n💡 กรุณาแก้ไขตัวเลขให้ถูกต้องแล้วส่งใหม่อีกครั้งครับ")
+            reply_line_message(reply_token, "\n".join(err_lines))
+            return
+            
+        # Valid edited data!
+        active_p = database.get_active_period()
+        if not active_p:
+            reply_line_message(reply_token, f"⛔️ ขณะนี้ระบบปิดรับข้อมูล (ยังไม่เปิดงวดใหม่)\n🌐 {BASE_URL}")
+            return
+            
+        worker_code = user_info.get("worker_code", "A")
+        emp_name = user_info.get("display_name", "พนักงาน")
+        
+        # Check if there is an existing pending scan
+        pending_scan = database.get_latest_pending_scan(user_id)
+        if pending_scan:
+            sheet_id = pending_scan["sheet_id"]
+            database.update_pending_scan_items(pending_scan["id"], parsed_sheet["columns"])
+            database.confirm_pending_scan(pending_scan["id"])
+        else:
+            raw_s = parsed_sheet.get("sheet_id") or "1"
+            sheet_id = f"{worker_code}-{raw_s}" if not raw_s.startswith(f"{worker_code}-") else raw_s
+            ocr_obj = {"header": {"sheet_id": sheet_id, "customer_name": emp_name}, "columns": parsed_sheet["columns"]}
+            new_id = database.create_pending_scan(user_id, worker_code, emp_name, active_p["id"], sheet_id, ocr_obj, val_result)
+            database.confirm_pending_scan(new_id)
+            
+        top_c = len(parsed_sheet["columns"].get("top", []))
+        bot_c = len(parsed_sheet["columns"].get("bottom", []))
+        topbot_c = len(parsed_sheet["columns"].get("top_bottom", []))
+        total_c = top_c + bot_c + topbot_c
+        
+        reply_msg = (
+            f"✅ บันทึกข้อมูลที่แก้ไขเรียบร้อยแล้วครับ!\n"
+            f"📋 ใบที่: {sheet_id}\n"
+            f"📌 ข้อมูลถูกบันทึกลงใน: {active_p['name']}\n"
+            f"📊 บันทึกทั้งหมด: {total_c} รายการ (บน {top_c} | ล่าง {bot_c} | บนล่าง {topbot_c})\n\n"
+            f"🌐 ดูตารางสด: {BASE_URL}"
+        )
+        reply_line_message(reply_token, reply_msg)
         return
         
     reply_line_message(
@@ -828,7 +1129,7 @@ class LineWebhookHandler(http.server.BaseHTTPRequestHandler):
                     if msg_type == "image":
                         handle_image_message(msg.get("id"), reply_token, user_id, user or {})
                     elif msg_type == "text":
-                        handle_text_message(msg.get("text", ""), reply_token, user_id, is_owner)
+                        handle_text_message(msg.get("text", ""), reply_token, user_id, is_owner, user or {})
                         
         except Exception as e:
             print(f"Error handling event: {e}")
