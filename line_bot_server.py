@@ -243,9 +243,11 @@ def parse_sheet_text(text: str) -> Optional[dict]:
     has_entries = False
     
     for line in lines:
-        m_sheet = re.match(r"^ใบที่(?:\s*[:\-]?\s*)([A-Za-z0-9\-_]+)", line)
+        m_sheet = re.search(r"ใบที่(?:\s*[:\-]?\s*)([A-Za-z0-9\-_]+)", line)
         if m_sheet:
-            sheet_id = m_sheet.group(1).strip()
+            found_id = m_sheet.group(1).strip()
+            if not sheet_id or (found_id and "-" in found_id):
+                sheet_id = found_id
             continue
             
         line_clean = line.replace("[", "").replace("]", "").replace(":", "").strip()
@@ -439,31 +441,26 @@ def handle_image_message(message_id: str, reply_token: str, user_id: str, user_i
         topbot_items = valid_cols.get("top_bottom", [])
         total_items = len(top_items) + len(bot_items) + len(topbot_items)
         
-        # Message 1: Period, summary & Instructions
-        msg1_text = (
+        # Combine summary header, clean editable numbers, and instructions into 1 single message bubble
+        clean_text = format_clean_editable_text(raw_sheet_id, valid_cols)
+        
+        combined_text = (
             f"📌 ข้อมูลนี้จะถูกบันทึกลงใน: {active_p['name']}\n"
             f"📋 อ่านข้อมูลได้ [ใบที่: {formatted_sheet_id}]\n"
             f"📊 รวมทั้งหมด: {total_items} รายการ | ผู้ส่ง: {emp_name} ({worker_code})\n"
             f"─────────────────────────\n"
-            f"✅ หากถูกต้องทั้งหมด: กดปุ่ม [ ยืนยัน ] ด้านล่างได้เลยครับ\n\n"
-            f"✏️ หากต้องการแก้ไข: สามารถก๊อปปี้ (Copy) ข้อความตัวเลขด้านล่างนี้ ไปลบหรือแก้ตัวเลข แล้วส่งกลับมาได้ทันทีครับ"
+            f"{clean_text}\n"
+            f"─────────────────────────\n"
+            f"✅ หากถูกต้อง: กดปุ่ม [ ยืนยัน ] ด้านล่างได้เลยครับ\n"
+            f"✏️ หากต้องการแก้ไข: คัดลอกข้อความนี้ไปแก้/ลบตัวเลข แล้วส่งกลับมาได้ทันทีครับ"
         )
         
-        # Message 2: Clean editable text block
-        clean_text = format_clean_editable_text(raw_sheet_id, valid_cols)
-        
         quick_replies = [
-            {"type": "action", "action": {"type": "message", "label": "✅ ยืนยัน", "text": f"ยืนยัน {scan_id}"}},
-            {"type": "action", "action": {"type": "message", "label": "❌ ยกเลิก", "text": f"ยกเลิก {scan_id}"}}
+            ("✅ ยืนยัน", f"ยืนยัน {scan_id}"),
+            ("❌ ยกเลิก", f"ยกเลิก {scan_id}")
         ]
         
-        msg2_obj = {
-            "type": "text",
-            "text": clean_text,
-            "quickReply": {"items": quick_replies}
-        }
-        
-        deliver_messages(user_id, reply_token, [{"type": "text", "text": msg1_text}, msg2_obj])
+        deliver_message(user_id, reply_token, combined_text, quick_replies)
         
     except Exception as e:
         print(f"Error handling image for {user_id}: {e}")
