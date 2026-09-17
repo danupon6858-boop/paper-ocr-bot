@@ -28,12 +28,7 @@ def reply_line_message(reply_token: str, text: str):
     url = "https://api.line.me/v2/bot/message/reply"
     payload = {
         "replyToken": reply_token,
-        "messages": [
-            {
-                "type": "text",
-                "text": text
-            }
-        ]
+        "messages": [{"type": "text", "text": text}]
     }
     req = urllib.request.Request(
         url,
@@ -49,20 +44,54 @@ def reply_line_message(reply_token: str, text: str):
     except Exception as e:
         print(f"Error sending LINE reply: {e}")
 
+def push_line_message(to_user_id: str, text: str):
+    url = "https://api.line.me/v2/bot/message/push"
+    payload = {
+        "to": to_user_id,
+        "messages": [{"type": "text", "text": text}]
+    }
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode('utf-8'),
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}"
+        }
+    )
+    try:
+        with urllib.request.urlopen(req) as resp:
+            pass
+    except Exception as e:
+        print(f"Error sending LINE push: {e}")
+
+def get_line_profile(user_id: str) -> str:
+    url = f"https://api.line.me/v2/bot/profile/{user_id}"
+    req = urllib.request.Request(
+        url,
+        headers={"Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}"}
+    )
+    try:
+        with urllib.request.urlopen(req) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            return data.get("displayName", "ผู้ใช้งานใหม่")
+    except Exception:
+        return "ผู้ใช้งานใหม่"
+
 def get_line_image_content(message_id: str) -> bytes:
     url = f"https://api-data.line.me/v2/bot/message/{message_id}/content"
     req = urllib.request.Request(
         url,
-        headers={
-            "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}"
-        }
+        headers={"Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}"}
     )
     with urllib.request.urlopen(req) as resp:
         return resp.read()
 
-def handle_image_message(message_id: str, reply_token: str, user_id: str):
+def handle_image_message(message_id: str, reply_token: str, user_id: str, user_info: dict):
     try:
-        print(f"Downloading image message {message_id}...")
+        worker_code = user_info.get("worker_code", "A")
+        emp_name = user_info.get("display_name", "พนักงาน")
+
+        print(f"Downloading image from {emp_name} ({worker_code})...")
         img_bytes = get_line_image_content(message_id)
         
         print("Processing OCR with Gemini 3.6 Flash...")
@@ -71,31 +100,31 @@ def handle_image_message(message_id: str, reply_token: str, user_id: str):
         print("Validating rules...")
         val_result = OCRValidator.validate_document(ocr_result)
         
+        # Prepend worker code to sheet_id if not already there
+        raw_sheet_id = ocr_result.get("header", {}).get("sheet_id", "").strip()
+        if raw_sheet_id:
+            formatted_sheet_id = f"{worker_code}-{raw_sheet_id}" if not raw_sheet_id.startswith(f"{worker_code}-") else raw_sheet_id
+        else:
+            formatted_sheet_id = f"{worker_code}-N/A"
+        ocr_result["header"]["sheet_id"] = formatted_sheet_id
+        ocr_result["header"]["customer_name"] = emp_name
+
         # Save to DB
         sheet_id = database.save_document(ocr_result, val_result)
-        
-        # Build line-by-line detailed response
-        header = ocr_result.get("header", {})
-        sheet_no = header.get("sheet_id") or f"แผ่นที่ #{sheet_id}"
-        emp_name = header.get("customer_name") or "-"
-        date_str = header.get("date") or "-"
         
         cols = val_result.get("validated_columns", {})
         top_items = cols.get("top", [])
         bot_items = cols.get("bottom", [])
         topbot_items = cols.get("top_bottom", [])
-        
         total_items = len(top_items) + len(bot_items) + len(topbot_items)
         
         lines = []
         if val_result.get("is_all_valid"):
-            lines.append(f"✅ บันทึกเรียบร้อย [ใบที่: {sheet_no}]")
+            lines.append(f"✅ บันทึกเรียบร้อย [ใบที่: {formatted_sheet_id}]")
         else:
-            lines.append(f"⚠️ บันทึกแล้ว แต่พบจุดผิดสังเกต [ใบที่: {sheet_no}]:")
+            lines.append(f"⚠️ บันทึกแล้ว แต่พบจุดผิดสังเกต [ใบที่: {formatted_sheet_id}]:")
             for err in val_result.get("errors", [])[:4]:
                 lines.append(f"  • {err}")
-            if len(val_result.get("errors", [])) > 4:
-                lines.append(f"  (และอีก {len(val_result.get('errors', [])) - 4} จุด)")
                 
         lines.append("─────────────────────────")
         
@@ -121,10 +150,9 @@ def handle_image_message(message_id: str, reply_token: str, user_id: str):
             
         lines.append("─────────────────────────")
         lines.append(f"📊 รวมทั้งหมด: {total_items} รายการ")
-        lines.append(f"👤 ผู้บันทึก: {emp_name} | 📅 วันที่: {date_str}")
+        lines.append(f"👤 ผู้ส่ง: {emp_name} (รหัส: {worker_code})")
         lines.append("")
-        lines.append(f"🌐 ดูกระดานสรุปแบบ Real-Time:")
-        lines.append(f"{BASE_URL}")
+        lines.append(f"🌐 ดูกระดานสรุปสด: {BASE_URL}")
         
         reply_line_message(reply_token, "\n".join(lines).strip())
         
@@ -132,14 +160,47 @@ def handle_image_message(message_id: str, reply_token: str, user_id: str):
         print(f"Error handling image: {e}")
         reply_line_message(reply_token, f"❌ ขออภัย ระบบอ่านภาพขัดข้อง: {e}\nกรุณาลองถ่ายภาพส่งใหม่อีกครั้งครับ")
 
-def handle_text_message(text: str, reply_token: str, user_id: str):
+def handle_owner_command(text: str, reply_token: str) -> bool:
+    clean = text.strip()
+    # Check for approval commands: "อนุมัติ [ชื่อ/ID] [รหัส A/B/C]"
+    m = re.match(r"^อนุมัติ\s+(\S+)\s+([A-Za-z0-9]+)$", clean)
+    if m:
+        target = m.group(1)
+        code = m.group(2).upper()
+        updated = database.approve_user(target, code)
+        if updated:
+            reply_line_message(reply_token, f"✅ อนุมัติเรียบร้อย!\n👤 {updated['display_name']}\n🏷️ ได้รับรหัสพนักงาน: [{code}]")
+            # Notify the worker
+            push_line_message(updated["user_id"], f"🎉 คุณได้รับการอนุมัติให้ใช้งานระบบแล้วครับ!\n🏷️ รหัสประจำตัวของคุณคือ: [{code}]\n💡 คุณสามารถเริ่มส่งรูปกระดาษบันทึกได้เลยครับ")
+        else:
+            reply_line_message(reply_token, f"❌ ไม่พบผู้ใช้งานที่ระบุ '{target}' ในระบบ")
+        return True
+        
+    # Check for block command: "บล็อก [ชื่อ/ID]"
+    m_block = re.match(r"^บล็อก\s+(\S+)$", clean)
+    if m_block:
+        target = m_block.group(1)
+        blocked = database.block_user(target)
+        if blocked:
+            reply_line_message(reply_token, f"⛔️ ระงับสิทธิ์การใช้งานของ {blocked['display_name']} เรียบร้อยแล้ว")
+        else:
+            reply_line_message(reply_token, f"❌ ไม่พบผู้ใช้งานที่ระบุ '{target}'")
+        return True
+
+    return False
+
+def handle_text_message(text: str, reply_token: str, user_id: str, is_owner: bool):
     clean_text = text.strip()
     
-    # 1. Search Query command: "เช็ค 310", "เช็ค 401 377", "check 310"
+    # 0. Owner Approval check
+    if is_owner and handle_owner_command(clean_text, reply_token):
+        return
+
+    # 1. Search Query command: "เช็ค 310"
     if clean_text.startswith("เช็ค") or clean_text.lower().startswith("check"):
         numbers = re.findall(r"\d+", clean_text)
         if not numbers:
-            reply_line_message(reply_token, "⚠️ กรุณาระบุตัวเลขที่ต้องการค้นหา เช่น\n'เช็ค 310' หรือ 'เช็ค 401 377'")
+            reply_line_message(reply_token, "⚠️ กรุณาระบุตัวเลขที่ต้องการค้นหา เช่น 'เช็ค 310' หรือ 'เช็ค 401 377'")
             return
         result_msg = query_service.format_search_results(numbers)
         reply_line_message(reply_token, result_msg)
@@ -148,7 +209,7 @@ def handle_text_message(text: str, reply_token: str, user_id: str):
     # 2. Status / Summary command
     if clean_text in ["สถานะ", "status", "ยอด", "สรุป", "ตาราง", "dashboard"]:
         status_msg = query_service.format_daily_status()
-        status_msg += f"\n\n🌐 ดูกระดานสรุป Real-Time ได้ที่:\n{BASE_URL}"
+        status_msg += f"\n\n🌐 ดูกระดานสรุป Real-Time:\n{BASE_URL}"
         reply_line_message(reply_token, status_msg)
         return
         
@@ -157,16 +218,21 @@ def handle_text_message(text: str, reply_token: str, user_id: str):
         help_msg = (
             "📋 เมนูการใช้งานระบบ\n"
             "─────────────────────────\n"
-            "1️⃣ ส่งรูปกระดาษ ➔ ระบบอ่านและแจ้งรายการตัวเลขทุกแถวทันที\n"
-            "2️⃣ พิมพ์ 'เช็ค [เลข]' ➔ ค้นหา เช่น เช็ค 310 หรือ เช็ค 401 370\n"
-            "3️⃣ พิมพ์ 'สรุป' หรือ 'สถานะ' ➔ ดูยอดรวมและลิงก์ตารางสรุปสด\n"
-            "─────────────────────────\n"
-            f"🌐 ลิงก์ตารางสรุปสด:\n{BASE_URL}"
+            "1️⃣ ส่งรูปกระดาษ ➔ ระบบอ่านและบันทึกข้อมูล\n"
+            "2️⃣ พิมพ์ 'เช็ค [เลข]' ➔ ค้นหาเลขชุดที่ 1\n"
+            "3️⃣ พิมพ์ 'สรุป' ➔ ดูยอดรวมและลิงก์ตารางสรุปสด\n"
         )
+        if is_owner:
+            help_msg += (
+                "─────────────────────────\n"
+                "👑 คำสั่งเจ้าของระบบ:\n"
+                "• 'อนุมัติ [ชื่อ] [รหัส A/B/C]' เพื่อเปิดสิทธิ์ให้พนักงาน\n"
+                "• 'บล็อก [ชื่อ]' เพื่อตัดสิทธิ์\n"
+            )
+        help_msg += f"─────────────────────────\n🌐 ตารางสรุปสด:\n{BASE_URL}"
         reply_line_message(reply_token, help_msg)
         return
         
-    # Default message
     reply_line_message(
         reply_token,
         f"💡 คุณสามารถถ่ายรูปกระดาษส่งเข้ามาได้เลยครับ\nหรือพิมพ์ 'เช็ค [ตัวเลข]' เพื่อค้นหา\nหรือพิมพ์ 'สรุป' เพื่อดูกระดานข้อมูลสด\n🌐 {BASE_URL}"
@@ -387,14 +453,44 @@ class LineWebhookHandler(http.server.BaseHTTPRequestHandler):
                 source = ev.get("source", {})
                 user_id = source.get("userId", "")
                 
+                if not user_id:
+                    continue
+                    
+                # 1. Check User Security Status
+                user = database.get_user(user_id)
+                is_owner = (user_id == OWNER_USER_ID)
+                
+                if not is_owner:
+                    if user is None:
+                        # New unknown user -> Register as PENDING and alert owner
+                        display_name = get_line_profile(user_id)
+                        database.register_pending_user(user_id, display_name)
+                        
+                        # Notify Owner
+                        push_line_message(
+                            OWNER_USER_ID,
+                            f"🔔 มีผู้ขอเข้าใช้งานระบบใหม่!\n👤 ชื่อ: {display_name}\n🆔 ID: {user_id}\n\nพิมพ์สั่งอนุมัติได้เลยครับ เช่น:\n'อนุมัติ {display_name} A'\n'อนุมัติ {display_name} B'\nหรือ 'บล็อก {display_name}'"
+                        )
+                        reply_line_message(reply_token, f"🔒 ขออภัยครับ บัญชีนี้เป็นระบบเฉพาะภายใน\nระบบได้ส่งคำขอไปยังเจ้าของระบบแล้ว กรุณารอการอนุมัติครับ")
+                        continue
+                        
+                    elif user.get("status") == "PENDING":
+                        reply_line_message(reply_token, "🔒 บัญชีของคุณอยู่ระหว่างรอเจ้าของระบบอนุมัติครับ กรุณารอสักครู่ครับ")
+                        continue
+                        
+                    elif user.get("status") == "BLOCKED":
+                        continue  # Silently ignore blocked users
+
+                # 2. Approved User / Owner -> Process events
                 if ev_type == "message":
                     msg = ev.get("message", {})
                     msg_type = msg.get("type")
                     
                     if msg_type == "image":
-                        handle_image_message(msg.get("id"), reply_token, user_id)
+                        handle_image_message(msg.get("id"), reply_token, user_id, user or {})
                     elif msg_type == "text":
-                        handle_text_message(msg.get("text", ""), reply_token, user_id)
+                        handle_text_message(msg.get("text", ""), reply_token, user_id, is_owner)
+                        
         except Exception as e:
             print(f"Error handling event: {e}")
 

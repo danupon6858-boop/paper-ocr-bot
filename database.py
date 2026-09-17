@@ -4,7 +4,7 @@ import csv
 import io
 import os
 from typing import List, Dict, Optional, Tuple
-from config import DB_PATH
+from config import DB_PATH, OWNER_USER_ID
 
 def get_db_connection():
     conn = sqlite3.connect(DB_PATH)
@@ -15,7 +15,7 @@ def init_db():
     conn = get_db_connection()
     cursor = conn.cursor()
     
-    # Table for Sheets (1 paper sheet = 1 row)
+    # Table for Sheets
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS sheets (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -30,7 +30,7 @@ def init_db():
     )
     """)
     
-    # Table for Entries (each line item in บน / ล่าง / บนล่าง)
+    # Table for Entries
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS entries (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -49,11 +49,93 @@ def init_db():
     )
     """)
     
+    # Table for Authorized Users (Security Whitelist)
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS users (
+        user_id TEXT PRIMARY KEY,
+        display_name TEXT,
+        role TEXT,
+        worker_code TEXT,
+        status TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+    
+    # Seed Owner
+    cursor.execute("""
+    INSERT OR IGNORE INTO users (user_id, display_name, role, worker_code, status)
+    VALUES (?, 'เจ้าของระบบ (Owner)', 'owner', 'ADMIN', 'APPROVED')
+    """, (OWNER_USER_ID,))
+    
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_entries_set1 ON entries (set1)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sheets_date ON sheets (date_str)")
     
     conn.commit()
     conn.close()
+
+# User Security Functions
+def get_user(user_id: str) -> Optional[Dict]:
+    init_db()
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
+    row = cursor.fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+def register_pending_user(user_id: str, display_name: str) -> bool:
+    init_db()
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("""
+        INSERT INTO users (user_id, display_name, role, worker_code, status)
+        VALUES (?, ?, 'worker', '-', 'PENDING')
+        """, (user_id, display_name))
+        conn.commit()
+        is_new = True
+    except sqlite3.IntegrityError:
+        is_new = False
+    conn.close()
+    return is_new
+
+def approve_user(user_id_prefix: str, worker_code: str) -> Optional[Dict]:
+    init_db()
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM users WHERE user_id LIKE ? OR user_id = ?", (f"%{user_id_prefix}%", user_id_prefix))
+    row = cursor.fetchone()
+    if not row:
+        conn.close()
+        return None
+    
+    u_id = row["user_id"]
+    cursor.execute("""
+    UPDATE users SET status = 'APPROVED', worker_code = ? WHERE user_id = ?
+    """, (worker_code.upper(), u_id))
+    conn.commit()
+    
+    cursor.execute("SELECT * FROM users WHERE user_id = ?", (u_id,))
+    updated = dict(cursor.fetchone())
+    conn.close()
+    return updated
+
+def block_user(user_id_prefix: str) -> Optional[Dict]:
+    init_db()
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM users WHERE user_id LIKE ? OR user_id = ?", (f"%{user_id_prefix}%", user_id_prefix))
+    row = cursor.fetchone()
+    if not row:
+        conn.close()
+        return None
+    u_id = row["user_id"]
+    cursor.execute("UPDATE users SET status = 'BLOCKED' WHERE user_id = ?", (u_id,))
+    conn.commit()
+    cursor.execute("SELECT * FROM users WHERE user_id = ?", (u_id,))
+    updated = dict(cursor.fetchone())
+    conn.close()
+    return updated
 
 def save_document(ocr_data: Dict, val_data: Dict, image_path: str = "") -> int:
     init_db()
@@ -165,11 +247,6 @@ def get_daily_summary(date_str: Optional[str] = None) -> Dict:
     }
 
 def export_csv(date_str: Optional[str] = None, output_path: Optional[str] = None) -> str:
-    """
-    Exports in 'Option 1' vertical format:
-    Headers: ลำดับ | บน | ล่าง | บนล่าง
-    Items ordered vertically row by row.
-    """
     init_db()
     conn = get_db_connection()
     cursor = conn.cursor()
