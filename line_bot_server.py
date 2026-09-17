@@ -1033,6 +1033,20 @@ class LineWebhookHandler(http.server.BaseHTTPRequestHandler):
         path = parsed.path
         qs = urllib.parse.parse_qs(parsed.query)
 
+        if path == "/health":
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            import ocr_engine
+            info = {
+                "status": "ok",
+                "version": "v1.3-gemini-1.5-flash",
+                "primary_model": ocr_engine.MODELS_CONFIG[0][0],
+                "models": ocr_engine.MODELS_CONFIG
+            }
+            self.wfile.write(json.dumps(info).encode("utf-8"))
+            return
+
         if path == "/export":
             p_id = int(qs.get("period_id", [0])[0]) or None
             csv_path = database.export_csv(p_id)

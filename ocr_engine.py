@@ -109,13 +109,12 @@ RESPONSE_SCHEMA = {
 }
 
 MODELS_CONFIG = [
-    ("gemini-2.5-flash", 2),
     ("gemini-1.5-flash", 2),
-    ("gemini-flash-latest", 1),
-    ("gemini-3.6-flash", 1)
+    ("gemini-2.5-flash", 1),
+    ("gemini-flash-latest", 1)
 ]
-GLOBAL_TIMEOUT_SECONDS = 55
-PER_REQUEST_TIMEOUT = 35
+GLOBAL_TIMEOUT_SECONDS = 50
+PER_REQUEST_TIMEOUT = 22
 
 def clean_and_parse_json(text: str) -> dict:
     text = text.strip()
