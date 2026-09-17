@@ -1,0 +1,2 @@
+# Zero external dependencies needed!
+# Everything uses Python 3 standard library.
