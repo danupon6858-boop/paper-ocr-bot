@@ -1040,8 +1040,8 @@ class LineWebhookHandler(http.server.BaseHTTPRequestHandler):
             import ocr_engine
             info = {
                 "status": "ok",
-                "version": "v1.3-gemini-1.5-flash",
-                "primary_model": ocr_engine.MODELS_CONFIG[0][0],
+                "version": "v1.4-v1-stable",
+                "primary_model": f"{ocr_engine.MODELS_CONFIG[0][0]}/{ocr_engine.MODELS_CONFIG[0][1]}",
                 "models": ocr_engine.MODELS_CONFIG
             }
             self.wfile.write(json.dumps(info).encode("utf-8"))

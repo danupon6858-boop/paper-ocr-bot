@@ -40,7 +40,27 @@ SYSTEM_PROMPT = """คุณคือ AI ผู้เชี่ยวชาญร
 - หากหางตัวเลขบรรทัดบนลากมาแตะหัวเลขบรรทัดล่าง ให้อ่านแยกแถวกันตามระดับบรรทัด
 - หากพบตัวเลขไทย (๑-๙) ให้แปลงเป็นเลขอารบิก (1-9)
 - หากมีรายการที่เบลอจนอ่านไม่ออก ให้ข้ามเฉพาะจุดนั้นไป และอ่านรายการอื่นๆ ให้ครบถ้วน
-- ห้ามตอบข้อความบรรยายเด็ดขาด ให้ส่งออกเป็น JSON ที่สมบูรณ์ตาม Schema เสมอ
+
+=======================================================
+4. โครงสร้าง JSON ที่ต้องส่งออก (ตอบเป็น JSON ล้วนเท่านั้น):
+=======================================================
+{
+  "header": {
+    "sheet_id": "1",
+    "customer_name": "",
+    "date": "",
+    "total_amount": ""
+  },
+  "columns": {
+    "top": [
+      {"set1": "401", "set3": "", "set2": "120x120", "raw_text": "401 = 120x120"}
+    ],
+    "bottom": [
+      {"set1": "12", "set3": "", "set2": "50", "raw_text": "12 = 50"}
+    ],
+    "top_bottom": []
+  }
+}
 """
 
 RESPONSE_SCHEMA = {
@@ -109,12 +129,13 @@ RESPONSE_SCHEMA = {
 }
 
 MODELS_CONFIG = [
-    ("gemini-1.5-flash", 2),
-    ("gemini-2.5-flash", 1),
-    ("gemini-flash-latest", 1)
+    ("v1", "gemini-1.5-flash", 2),
+    ("v1beta", "gemini-1.5-flash", 1),
+    ("v1beta", "gemini-2.5-flash", 1),
+    ("v1beta", "gemini-flash-latest", 1)
 ]
 GLOBAL_TIMEOUT_SECONDS = 50
-PER_REQUEST_TIMEOUT = 22
+PER_REQUEST_TIMEOUT = 20
 
 def clean_and_parse_json(text: str) -> dict:
     text = text.strip()
@@ -247,7 +268,6 @@ def extract_from_image(image_bytes: bytes, mime_type: str = "image/jpeg") -> dic
         ],
         "generationConfig": {
             "response_mime_type": "application/json",
-            "response_schema": RESPONSE_SCHEMA,
             "temperature": 0.1
         }
     }
@@ -257,14 +277,14 @@ def extract_from_image(image_bytes: bytes, mime_type: str = "image/jpeg") -> dic
     start_time = time.time()
 
     # Retry loop with fast failover and strict global timeout
-    for model_name, max_attempts in MODELS_CONFIG:
+    for api_ver, model_name, max_attempts in MODELS_CONFIG:
         for attempt in range(max_attempts):
             elapsed = time.time() - start_time
             if elapsed >= GLOBAL_TIMEOUT_SECONDS:
                 print(f"Global timeout budget ({GLOBAL_TIMEOUT_SECONDS}s) reached. Aborting OCR.")
                 raise TimeoutError("AI ใช้เวลาประมวลผลภาพนี้นานเกินกำหนด (ภาพอ่านยาก)")
 
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={API_KEY}"
+            url = f"https://generativelanguage.googleapis.com/{api_ver}/models/{model_name}:generateContent?key={API_KEY}"
             req = urllib.request.Request(
                 url,
                 data=payload_bytes,
@@ -287,10 +307,10 @@ def extract_from_image(image_bytes: bytes, mime_type: str = "image/jpeg") -> dic
             except urllib.error.HTTPError as e:
                 last_exception = e
                 err_body = e.read().decode("utf-8", errors="ignore") if hasattr(e, "read") else ""
-                print(f"[{model_name}] HTTP Error {e.code} on attempt {attempt+1}: {e.reason} - {err_body}")
+                print(f"[{api_ver}/{model_name}] HTTP Error {e.code} on attempt {attempt+1}: {e.reason} - {err_body}")
                 if e.code in [500, 502, 503, 504, 429]:
                     if time.time() - start_time + 1.5 < GLOBAL_TIMEOUT_SECONDS:
-                        time.sleep(1.0)
+                        time.sleep(1.2 * (attempt + 1))
                         continue
                 if e.code in [401, 403]:
                     msg = "GEMINI_API_KEY ไม่ถูกต้องหรือหมดอายุ"
@@ -303,16 +323,22 @@ def extract_from_image(image_bytes: bytes, mime_type: str = "image/jpeg") -> dic
                 break
             except Exception as e:
                 last_exception = e
-                print(f"[{model_name}] Error on attempt {attempt+1}: {e}")
+                print(f"[{api_ver}/{model_name}] Error on attempt {attempt+1}: {e}")
                 if time.time() - start_time + 1.5 < GLOBAL_TIMEOUT_SECONDS:
                     time.sleep(1.0)
                     continue
                 break
 
     if last_exception:
-        if isinstance(last_exception, urllib.error.HTTPError) and last_exception.code == 503:
-            raise RuntimeError("Google Gemini กำลังมีผู้ใช้งานหนาแน่นชั่วคราว (HTTP 503) กรุณาลองส่งใหม่อีกครั้งใน 10 วินาที")
-        raise last_exception
+        err_msg = str(last_exception)
+        if hasattr(last_exception, "read"):
+            try:
+                eb = last_exception.read().decode("utf-8", errors="ignore")
+                ed = json.loads(eb)
+                err_msg = ed.get("error", {}).get("message", eb)
+            except Exception:
+                pass
+        raise RuntimeError(f"Google Gemini ({getattr(last_exception, 'code', 'Error')}): {err_msg[:90]}")
     raise RuntimeError("Unable to extract data from image after retries.")
 
 def extract_from_file(file_path: str) -> dict:
