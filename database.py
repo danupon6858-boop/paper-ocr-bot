@@ -342,6 +342,10 @@ def confirm_pending_scan(scan_id: int) -> Optional[Dict]:
     content_hash = compute_sheet_content_hash(val_data.get("validated_columns", {}))
     status = "VERIFIED" if val_data.get("is_all_valid") else "NEEDS_REVIEW"
     
+    header = ocr_data.get("header") if isinstance(ocr_data.get("header"), dict) else {}
+    date_str = str(header.get("date") or "")
+    total_amount = str(header.get("total_amount") or "")
+
     cursor.execute("""
     INSERT INTO sheets (period_id, sheet_id, employee_name, worker_code, date_str, total_amount, image_path, content_hash, raw_json, status)
     VALUES (?, ?, ?, ?, ?, ?, '', ?, ?, ?)
@@ -350,8 +354,8 @@ def confirm_pending_scan(scan_id: int) -> Optional[Dict]:
         sheet_id,
         emp_name,
         worker_code,
-        ocr_data.get("header", {}).get("date", ""),
-        ocr_data.get("header", {}).get("total_amount", ""),
+        date_str,
+        total_amount,
         content_hash,
         json.dumps(ocr_data, ensure_ascii=False),
         status
@@ -373,7 +377,7 @@ def confirm_pending_scan(scan_id: int) -> Optional[Dict]:
                 sheet_id,
                 emp_name,
                 worker_code,
-                ocr_data.get("header", {}).get("date", ""),
+                date_str,
                 col_label,
                 itm.get("set1", ""),
                 itm.get("set2", ""),

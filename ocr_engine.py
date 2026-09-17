@@ -109,11 +109,11 @@ RESPONSE_SCHEMA = {
 }
 
 MODELS_CONFIG = [
-    ("gemini-3.6-flash", 2),
+    ("gemini-3.6-flash", 1),
     ("gemini-flash-latest", 1)
 ]
-GLOBAL_TIMEOUT_SECONDS = 28
-PER_REQUEST_TIMEOUT = 20
+GLOBAL_TIMEOUT_SECONDS = 55
+PER_REQUEST_TIMEOUT = 45
 
 def clean_and_parse_json(text: str) -> dict:
     text = text.strip()
@@ -148,25 +148,42 @@ THAI_DIGITS_TABLE = str.maketrans("๑๒๓๔๕๖๗๘๙๐", "1234567890"
 
 def auto_repair_extracted_data(ocr_result: dict) -> dict:
     if not isinstance(ocr_result, dict):
-        return ocr_result
+        ocr_result = {}
         
-    columns = ocr_result.get("columns", {})
+    # Guarantee header dictionary and string fields (protect against None/null)
+    header = ocr_result.get("header")
+    if not isinstance(header, dict):
+        header = {}
+    ocr_result["header"] = {
+        "sheet_id": str(header.get("sheet_id") or "").strip(),
+        "customer_name": str(header.get("customer_name") or "").strip(),
+        "date": str(header.get("date") or "").strip(),
+        "total_amount": str(header.get("total_amount") or "").strip(),
+    }
+    
+    columns = ocr_result.get("columns")
     if not isinstance(columns, dict):
-        return ocr_result
+        columns = {}
         
     repaired_cols = {}
     for col_key in ["top", "bottom", "top_bottom"]:
-        items = columns.get(col_key, [])
+        items = columns.get(col_key)
+        if not isinstance(items, list):
+            items = []
         new_items = []
         for itm in items:
             if not isinstance(itm, dict):
                 continue
                 
-            s1 = str(itm.get("set1", "")).translate(THAI_DIGITS_TABLE).strip()
-            s2 = str(itm.get("set2", "")).translate(THAI_DIGITS_TABLE).strip()
-            s3 = str(itm.get("set3", "")).strip()
-            raw = str(itm.get("raw_text", "")).strip()
+            s1 = str(itm.get("set1") or "").translate(THAI_DIGITS_TABLE).strip()
+            s2 = str(itm.get("set2") or "").translate(THAI_DIGITS_TABLE).strip()
+            s3 = str(itm.get("set3") or "").strip()
+            raw = str(itm.get("raw_text") or "").strip()
             
+            # Skip completely empty entries
+            if not s1 and not s2:
+                continue
+                
             # Check if s1 contains an embedded price (e.g. s1="401=120")
             if "=" in s1 and not s2:
                 p = s1.split("=", 1)

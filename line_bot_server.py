@@ -406,8 +406,10 @@ def handle_image_message(message_id: str, reply_token: str, user_id: str, user_i
         val_result = OCRValidator.validate_document(ocr_result)
         
         # Prepend worker code to sheet_id if not already there
-        raw_sheet_id = ocr_result.get("header", {}).get("sheet_id", "").strip()
-        if raw_sheet_id:
+        header = ocr_result.get("header") if isinstance(ocr_result.get("header"), dict) else {}
+        ocr_result["header"] = header
+        raw_sheet_id = str(header.get("sheet_id") or "").strip()
+        if raw_sheet_id and raw_sheet_id.lower() not in ["none", "null", "n/a", ""]:
             formatted_sheet_id = f"{worker_code}-{raw_sheet_id}" if not raw_sheet_id.startswith(f"{worker_code}-") else raw_sheet_id
         else:
             formatted_sheet_id = f"{worker_code}-1"
@@ -463,9 +465,13 @@ def handle_image_message(message_id: str, reply_token: str, user_id: str, user_i
         deliver_message(user_id, reply_token, combined_text, quick_replies)
         
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         print(f"Error handling image for {user_id}: {e}")
+        err_type = type(e).__name__
+        err_detail = f" ({err_type}: {str(e)[:50]})" if str(e) else f" ({err_type})"
         err_msg = (
-            "⚠️ ภาพนี้อ่านยากหรือใช้เวลาประมวลผลนานเกินไปครับ\n"
+            f"⚠️ ภาพนี้อ่านยากหรือเกิดข้อผิดพลาดระหว่างประมวลผลครับ{err_detail}\n"
             "─────────────────────────\n"
             "💡 ระบบไม่สามารถอ่านตัวเลขได้ชัดเจนในรอบนี้\n\n"
             "คำแนะนำ:\n"
