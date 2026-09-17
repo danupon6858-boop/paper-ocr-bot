@@ -8,6 +8,8 @@ import urllib.error
 import urllib.parse
 import re
 import os
+import threading
+import time
 from typing import List, Dict, Optional, Tuple
 from config import LINE_CHANNEL_SECRET, LINE_CHANNEL_ACCESS_TOKEN, OWNER_USER_ID
 import ocr_engine
@@ -26,19 +28,13 @@ def verify_line_signature(body_bytes: bytes, signature: str) -> bool:
     ).decode('utf-8')
     return hmac.compare_digest(gen_sig, signature)
 
-def reply_line_message(reply_token: str, text: str, quick_reply_items: list = None):
+def reply_line_messages(reply_token: str, messages: list) -> bool:
+    if not reply_token:
+        return False
     url = "https://api.line.me/v2/bot/message/reply"
-    msg_obj = {"type": "text", "text": text}
-    if quick_reply_items:
-        msg_obj["quickReply"] = {
-            "items": [
-                {"type": "action", "action": {"type": "message", "label": label, "text": text_val}}
-                for label, text_val in quick_reply_items
-            ]
-        }
     payload = {
         "replyToken": reply_token,
-        "messages": [msg_obj]
+        "messages": messages
     }
     req = urllib.request.Request(
         url,
@@ -50,12 +46,16 @@ def reply_line_message(reply_token: str, text: str, quick_reply_items: list = No
     )
     try:
         with urllib.request.urlopen(req) as resp:
-            pass
+            return True
+    except urllib.error.HTTPError as e:
+        err_body = e.read().decode('utf-8', errors='ignore') if hasattr(e, 'read') else ''
+        print(f"Error sending LINE reply messages: HTTP {e.code} - {err_body}")
+        return False
     except Exception as e:
-        print(f"Error sending LINE reply: {e}")
+        print(f"Error sending LINE reply messages: {e}")
+        return False
 
-def push_line_message(to_user_id: str, text: str, quick_reply_items: list = None):
-    url = "https://api.line.me/v2/bot/message/push"
+def reply_line_message(reply_token: str, text: str, quick_reply_items: list = None) -> bool:
     msg_obj = {"type": "text", "text": text}
     if quick_reply_items:
         msg_obj["quickReply"] = {
@@ -64,25 +64,9 @@ def push_line_message(to_user_id: str, text: str, quick_reply_items: list = None
                 for label, text_val in quick_reply_items
             ]
         }
-    payload = {
-        "to": to_user_id,
-        "messages": [msg_obj]
-    }
-    req = urllib.request.Request(
-        url,
-        data=json.dumps(payload).encode('utf-8'),
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}"
-        }
-    )
-    try:
-        with urllib.request.urlopen(req) as resp:
-            pass
-    except Exception as e:
-        print(f"Error sending LINE push: {e}")
+    return reply_line_messages(reply_token, [msg_obj])
 
-def push_line_messages(to_user_id: str, messages: list):
+def push_line_messages(to_user_id: str, messages: list) -> bool:
     url = "https://api.line.me/v2/bot/message/push"
     payload = {
         "to": to_user_id,
@@ -98,11 +82,47 @@ def push_line_messages(to_user_id: str, messages: list):
     )
     try:
         with urllib.request.urlopen(req) as resp:
-            pass
+            return True
+    except urllib.error.HTTPError as e:
+        err_body = e.read().decode('utf-8', errors='ignore') if hasattr(e, 'read') else ''
+        print(f"Error sending LINE push messages: HTTP {e.code} - {err_body}")
+        return False
     except Exception as e:
         print(f"Error sending LINE push messages: {e}")
+        return False
 
-def send_line_loading_indicator(chat_id: str, loading_seconds: int = 20):
+def push_line_message(to_user_id: str, text: str, quick_reply_items: list = None) -> bool:
+    msg_obj = {"type": "text", "text": text}
+    if quick_reply_items:
+        msg_obj["quickReply"] = {
+            "items": [
+                {"type": "action", "action": {"type": "message", "label": label, "text": text_val}}
+                for label, text_val in quick_reply_items
+            ]
+        }
+    return push_line_messages(to_user_id, [msg_obj])
+
+def deliver_messages(user_id: str, reply_token: str, messages: list) -> bool:
+    """Delivers messages via replyToken first (free & unlimited). If expired or failed, falls back to push."""
+    if reply_token:
+        ok = reply_line_messages(reply_token, messages)
+        if ok:
+            return True
+        print(f"reply_token delivery failed for {user_id}, falling back to push API...")
+    return push_line_messages(user_id, messages)
+
+def deliver_message(user_id: str, reply_token: str, text: str, quick_reply_items: list = None) -> bool:
+    msg_obj = {"type": "text", "text": text}
+    if quick_reply_items:
+        msg_obj["quickReply"] = {
+            "items": [
+                {"type": "action", "action": {"type": "message", "label": label, "text": text_val}}
+                for label, text_val in quick_reply_items
+            ]
+        }
+    return deliver_messages(user_id, reply_token, [msg_obj])
+
+def send_line_loading_indicator(chat_id: str, loading_seconds: int = 60):
     url = "https://api.line.me/v2/bot/chat/loading/start"
     payload = {
         "chatId": chat_id,
@@ -347,12 +367,11 @@ def handle_image_message(message_id: str, reply_token: str, user_id: str, user_i
             "กรุณารอเจ้าของเปิดงวดก่อนส่งรูปครับ\n\n"
             f"🌐 ตรวจสอบสถานะงวดได้ที่:\n{BASE_URL}"
         )
-        reply_line_message(reply_token, msg)
+        deliver_message(user_id, reply_token, msg)
         return
 
-    # Immediately acknowledge image receipt and start typing indicator
-    reply_line_message(reply_token, "📥 ได้รับรูปภาพแล้วครับ ระบบกำลังประมวลผลอ่านตัวเลข... ⏳")
-    send_line_loading_indicator(user_id, 25)
+    # Start 60s typing indicator (native animation in LINE chat; no chat clutter, preserves replyToken)
+    send_line_loading_indicator(user_id, 60)
 
     try:
         worker_code = user_info.get("worker_code", "A")
@@ -368,10 +387,17 @@ def handle_image_message(message_id: str, reply_token: str, user_id: str, user_i
         raw_cols = ocr_result.get("columns", {}) if ocr_result else {}
         total_raw = sum(len(items) for items in raw_cols.values())
         if total_raw == 0:
-            push_line_message(
-                user_id,
-                "❌ ขออภัยครับ ภาพนี้ไม่ชัดเจน หรืออ่านตัวเลขไม่พบ\nกรุณาตรวจดูความสว่าง/ความคมชัด แล้วถ่ายรูปส่งใหม่อีกครั้งครับ 📷"
+            no_data_msg = (
+                "⚠️ ภาพนี้ระบบอ่านตัวเลขไม่พบ หรือลายมือไม่ชัดเจนครับ\n"
+                "─────────────────────────\n"
+                "💡 คำแนะนำ:\n"
+                "1. ตรวจสอบความสว่าง/ความคมชัด แล้วถ่ายรูปส่งใหม่อีกครั้งครับ 📷\n"
+                "2. หรือพิมพ์ข้อความตัวเลขส่งเข้ามาทางแชทนี้ได้เลยครับ เช่น:\n"
+                "ใบที่ 1\n"
+                "[บน]\n"
+                "401 = 120x120"
             )
+            deliver_message(user_id, reply_token, no_data_msg)
             return
 
         print("Validating rules...")
@@ -399,7 +425,7 @@ def handle_image_message(message_id: str, reply_token: str, user_id: str, user_i
                 f"{dup_msg}\n\n"
                 f"💡 ระบบระงับการบันทึกใบนี้ เพื่อป้องกันตัวเลขเบิ้ลครับ"
             )
-            push_line_message(user_id, dup_reply)
+            deliver_message(user_id, reply_token, dup_reply)
             return
 
         # 3. Create Pending Scan
@@ -437,11 +463,22 @@ def handle_image_message(message_id: str, reply_token: str, user_id: str, user_i
             "quickReply": {"items": quick_replies}
         }
         
-        push_line_messages(user_id, [{"type": "text", "text": msg1_text}, msg2_obj])
+        deliver_messages(user_id, reply_token, [{"type": "text", "text": msg1_text}, msg2_obj])
         
     except Exception as e:
-        print(f"Error handling image: {e}")
-        push_line_message(user_id, f"❌ ขออภัย ระบบอ่านภาพขัดข้อง: {e}\nกรุณาลองถ่ายภาพส่งใหม่อีกครั้งครับ")
+        print(f"Error handling image for {user_id}: {e}")
+        err_msg = (
+            "⚠️ ภาพนี้อ่านยากหรือใช้เวลาประมวลผลนานเกินไปครับ\n"
+            "─────────────────────────\n"
+            "💡 ระบบไม่สามารถอ่านตัวเลขได้ชัดเจนในรอบนี้\n\n"
+            "คำแนะนำ:\n"
+            "1. ถ่ายใหม่อีกครั้งในมุมตรง ให้เห็นตารางและตัวเลขชัดเจน 📷\n"
+            "2. หรือพิมพ์ข้อความตัวเลขส่งเข้ามาทางแชทนี้ได้เลยครับ เช่น:\n"
+            "ใบที่ 1\n"
+            "[บน]\n"
+            "401 = 120x120"
+        )
+        deliver_message(user_id, reply_token, err_msg)
 
 def handle_owner_command(text: str, reply_token: str) -> bool:
     clean = text.strip()
@@ -1127,7 +1164,12 @@ class LineWebhookHandler(http.server.BaseHTTPRequestHandler):
                     msg = ev.get("message", {})
                     msg_type = msg.get("type")
                     if msg_type == "image":
-                        handle_image_message(msg.get("id"), reply_token, user_id, user or {})
+                        # Process OCR asynchronously in background thread so webhook responds immediately
+                        threading.Thread(
+                            target=handle_image_message,
+                            args=(msg.get("id"), reply_token, user_id, user or {}),
+                            daemon=True
+                        ).start()
                     elif msg_type == "text":
                         handle_text_message(msg.get("text", ""), reply_token, user_id, is_owner, user or {})
                         
@@ -1135,8 +1177,9 @@ class LineWebhookHandler(http.server.BaseHTTPRequestHandler):
             print(f"Error handling event: {e}")
 
 def run_server():
-    server = http.server.HTTPServer(("0.0.0.0", PORT), LineWebhookHandler)
-    print(f"🚀 LINE Bot Server running on port {PORT}...")
+    server_cls = getattr(http.server, "ThreadingHTTPServer", http.server.HTTPServer)
+    server = server_cls(("0.0.0.0", PORT), LineWebhookHandler)
+    print(f"🚀 LINE Bot Server running on port {PORT} (Threaded)...")
     server.serve_forever()
 
 if __name__ == "__main__":

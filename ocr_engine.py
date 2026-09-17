@@ -1,11 +1,10 @@
 import json
 import base64
 import time
+import re
 import urllib.request
 import urllib.error
 from config import GEMINI_API_KEY as API_KEY
-
-MODELS_FALLBACK = ["gemini-3.6-flash", "gemini-flash-latest", "gemini-3.5-flash"]
 
 SYSTEM_PROMPT = """คุณคือ AI ผู้เชี่ยวชาญด้านการถอดลายมือภาษาไทยและตัวเลขจากเอกสารบันทึกข้อมูล
 หน้าที่ของคุณคืออ่านข้อมูลในกระดาษแล้วแปลงเป็น JSON ตามโครงสร้างที่กำหนดอย่างเคร่งครัด 100%
@@ -24,6 +23,9 @@ SYSTEM_PROMPT = """คุณคือ AI ผู้เชี่ยวชาญด
   * "บนล่าง" (ถ้ามี)
 - สำคัญมาก: ต้องสแกนอ่านให้ครบทุกคอลัมน์ทั่วทั้งแผ่น (ทั้งฝั่งซ้ายและฝั่งขวา) ห้ามมองข้ามคอลัมน์ใดคอลัมน์หนึ่ง
 - หากมีข้อมูลหัวเอกสาร เช่น ชื่อลูกค้า/พนักงาน, วันที่, ใบที่ ให้สกัดออกมาด้วย (ถ้าไม่มีให้ใส่ "")
+- ข้อกำหนดสำหรับภาพที่อ่านยากหรือไม่ชัด:
+  * ให้อ่านเฉพาะรายการที่เห็นตัวเลขชัดเจน ส่วนที่เบลอหรืออ่านไม่ออกให้ข้ามไป
+  * ห้ามตอบข้อความบรรยาย คำอธิบาย หรือข้อความอื่นนอกเหนือจากรูปแบบ JSON อย่างเด็ดขาด
 """
 
 RESPONSE_SCHEMA = {
@@ -91,6 +93,42 @@ RESPONSE_SCHEMA = {
     "required": ["header", "columns"]
 }
 
+MODELS_CONFIG = [
+    ("gemini-3.6-flash", 2),
+    ("gemini-flash-latest", 1)
+]
+GLOBAL_TIMEOUT_SECONDS = 28
+PER_REQUEST_TIMEOUT = 20
+
+def clean_and_parse_json(text: str) -> dict:
+    text = text.strip()
+    if not text:
+        raise ValueError("Empty response from Gemini")
+    
+    # Strip markdown codeblocks
+    if text.startswith("```"):
+        lines = text.splitlines()
+        if lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].startswith("```"):
+            lines = lines[:-1]
+        text = "\n".join(lines).strip()
+        
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+        
+    # Search for first outermost { ... }
+    m = re.search(r"\{.*\}", text, re.DOTALL)
+    if m:
+        try:
+            return json.loads(m.group(0))
+        except Exception:
+            pass
+            
+    raise ValueError(f"Could not parse valid JSON from text: {text[:100]}")
+
 def extract_from_image(image_bytes: bytes, mime_type: str = "image/jpeg") -> dict:
     img_b64 = base64.b64encode(image_bytes).decode("utf-8")
     
@@ -120,10 +158,16 @@ def extract_from_image(image_bytes: bytes, mime_type: str = "image/jpeg") -> dic
     
     payload_bytes = json.dumps(payload).encode("utf-8")
     last_exception = None
+    start_time = time.time()
 
-    # Retry loop with backoff and model fallback
-    for model_name in MODELS_FALLBACK:
-        for attempt in range(3):
+    # Retry loop with fast failover and strict global timeout
+    for model_name, max_attempts in MODELS_CONFIG:
+        for attempt in range(max_attempts):
+            elapsed = time.time() - start_time
+            if elapsed >= GLOBAL_TIMEOUT_SECONDS:
+                print(f"Global timeout budget ({GLOBAL_TIMEOUT_SECONDS}s) reached. Aborting OCR.")
+                raise TimeoutError("AI ใช้เวลาประมวลผลภาพนี้นานเกินกำหนด (ภาพอ่านยาก)")
+
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={API_KEY}"
             req = urllib.request.Request(
                 url,
@@ -131,23 +175,34 @@ def extract_from_image(image_bytes: bytes, mime_type: str = "image/jpeg") -> dic
                 headers={"Content-Type": "application/json"}
             )
             try:
-                with urllib.request.urlopen(req, timeout=45) as resp:
+                with urllib.request.urlopen(req, timeout=PER_REQUEST_TIMEOUT) as resp:
                     data = json.loads(resp.read().decode("utf-8"))
-                    text = data["candidates"][0]["content"]["parts"][0]["text"]
-                    return json.loads(text)
+                    candidates = data.get("candidates", [])
+                    if not candidates:
+                        raise ValueError("No candidates returned from Gemini")
+                    
+                    parts = candidates[0].get("content", {}).get("parts", [])
+                    if not parts:
+                        raise ValueError("Empty content parts in Gemini response")
+                    
+                    text = parts[0].get("text", "")
+                    return clean_and_parse_json(text)
             except urllib.error.HTTPError as e:
                 last_exception = e
-                print(f"[{model_name}] HTTP Error {e.code} on attempt {attempt+1}: {e.reason}")
+                err_body = e.read().decode("utf-8", errors="ignore") if hasattr(e, "read") else ""
+                print(f"[{model_name}] HTTP Error {e.code} on attempt {attempt+1}: {e.reason} - {err_body}")
                 if e.code in [500, 502, 503, 504, 429]:
-                    time.sleep(1.5 * (attempt + 1))
-                    continue
-                else:
-                    break
+                    if time.time() - start_time + 1.5 < GLOBAL_TIMEOUT_SECONDS:
+                        time.sleep(1.0)
+                        continue
+                break
             except Exception as e:
                 last_exception = e
-                print(f"[{model_name}] Network error on attempt {attempt+1}: {e}")
-                time.sleep(1.5)
-                continue
+                print(f"[{model_name}] Error on attempt {attempt+1}: {e}")
+                if time.time() - start_time + 1.5 < GLOBAL_TIMEOUT_SECONDS:
+                    time.sleep(1.0)
+                    continue
+                break
 
     if last_exception:
         raise last_exception
