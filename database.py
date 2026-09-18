@@ -6,7 +6,8 @@ import os
 import hashlib
 from datetime import datetime
 from typing import List, Dict, Optional, Tuple
-from config import DB_PATH, OWNER_USER_ID
+from config import DB_PATH, OWNER_USER_ID, PRE_APPROVED_USERS
+
 
 def get_db_connection():
     conn = sqlite3.connect(DB_PATH)
@@ -130,7 +131,23 @@ def init_db():
     INSERT OR IGNORE INTO users (user_id, display_name, role, worker_code, status)
     VALUES (?, 'เจ้าของระบบ (Owner)', 'owner', 'ADMIN', 'APPROVED')
     """, (OWNER_USER_ID,))
-    
+
+    # Seed pre-approved users from PRE_APPROVED_USERS env var (survives redeploys)
+    for i, pre_uid in enumerate(PRE_APPROVED_USERS):
+        if not pre_uid:
+            continue
+        # Assign letter codes A, B, C... automatically
+        letter = chr(ord('A') + i) if i < 26 else 'Z'
+        cursor.execute("""
+        INSERT OR IGNORE INTO users (user_id, display_name, role, worker_code, status)
+        VALUES (?, ?, 'worker', ?, 'APPROVED')
+        """, (pre_uid, f"พนักงาน {letter}", letter))
+        # If user already exists but is PENDING, upgrade to APPROVED
+        cursor.execute("""
+        UPDATE users SET status = 'APPROVED', worker_code = ?
+        WHERE user_id = ? AND status = 'PENDING'
+        """, (letter, pre_uid))
+
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_entries_set1 ON entries (set1)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_entries_period ON entries (period_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sheets_period ON sheets (period_id)")
@@ -476,16 +493,26 @@ def register_pending_user(user_id: str, display_name: str) -> bool:
     conn = get_db_connection()
     cursor = conn.cursor()
     try:
-        cursor.execute("""
-        INSERT INTO users (user_id, display_name, role, worker_code, status)
-        VALUES (?, ?, 'worker', '-', 'PENDING')
-        """, (user_id, display_name))
+        # If this user is in the pre-approved list, register as APPROVED directly
+        if user_id in PRE_APPROVED_USERS:
+            idx = PRE_APPROVED_USERS.index(user_id)
+            letter = chr(ord('A') + idx) if idx < 26 else 'Z'
+            cursor.execute("""
+            INSERT INTO users (user_id, display_name, role, worker_code, status)
+            VALUES (?, ?, 'worker', ?, 'APPROVED')
+            """, (user_id, display_name, letter))
+        else:
+            cursor.execute("""
+            INSERT INTO users (user_id, display_name, role, worker_code, status)
+            VALUES (?, ?, 'worker', '-', 'PENDING')
+            """, (user_id, display_name))
         conn.commit()
         is_new = True
     except sqlite3.IntegrityError:
         is_new = False
     conn.close()
     return is_new
+
 
 def get_next_worker_code() -> str:
     init_db()
