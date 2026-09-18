@@ -1633,6 +1633,11 @@ def render_html_dashboard(period_id: Optional[int] = None, scope: str = "period"
             }}
         }}
 
+        function closeDeepSearch() {{
+            var resBox = document.getElementById("deepSearchResult");
+            if (resBox) resBox.style.display = "none";
+        }}
+
         async function executeDeepSearch() {{
             var q = document.getElementById('searchInput').value.trim();
             var resBox = document.getElementById('deepSearchResult');
@@ -1650,7 +1655,7 @@ def render_html_dashboard(period_id: Optional[int] = None, scope: str = "period"
                 if (!data.matches || data.matches.length === 0) {{
                     resBox.innerHTML = '<div style="display:flex; justify-content:space-between; align-items:center;">' +
                         '<span style="font-weight:700; color:#dc2626;">❌ ไม่พบเลข "' + data.query + '" ในงวดนี้</span>' +
-                        '<button onclick="document.getElementById(\'deepSearchResult\').style.display=\'none\'" style="background:none; border:none; font-size:16px; cursor:pointer; color:#94a3b8;">✕ ปิด</button>' +
+                        '<button onclick="closeDeepSearch()" style="background:none; border:none; font-size:16px; cursor:pointer; color:#94a3b8;">✕ ปิด</button>' +
                     '</div>';
                     return;
                 }}
@@ -1672,7 +1677,7 @@ def render_html_dashboard(period_id: Optional[int] = None, scope: str = "period"
                         '<span style="font-size:18px; font-weight:800; color:#1e40af;">🔍 ผลการเจาะลึกเลข "' + data.query + '"</span>' +
                         '<span style="margin-left:8px; font-size:13px; color:#64748b;">(พบทั้งหมด <b>' + data.total_count + '</b> จุด | ยอดรวม <b>' + Number(data.total_volume).toLocaleString() + '</b> บาท)</span>' +
                     '</div>' +
-                    '<button onclick="document.getElementById(\'deepSearchResult\').style.display=\'none\'" style="background:#f1f5f9; border:none; border-radius:6px; padding:4px 10px; font-size:13px; cursor:pointer; color:#475569; font-weight:700;">✕ ปิดหน้าต่างนี้</button>' +
+                    '<button onclick="closeDeepSearch()" style="background:#f1f5f9; border:none; border-radius:6px; padding:4px 10px; font-size:13px; cursor:pointer; color:#475569; font-weight:700;">✕ ปิดหน้าต่างนี้</button>' +
                 '</div>' +
                 '<div style="display:flex; gap:8px; margin-bottom:12px; flex-wrap:wrap;">' +
                     '<span style="background:#eff6ff; color:#1d4ed8; padding:4px 10px; border-radius:6px; font-size:12px; font-weight:700;">บน: ' + (data.cat_breakdown['บน'] || 0) + '</span>' +

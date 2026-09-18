@@ -15,72 +15,122 @@ DEFAULT_PAYOUT_RATES = {
 
 def fetch_latest_thai_lottery() -> Dict:
     """
-    Fetches the latest Thai lottery results from GLO/Sanook API.
-    Returns structured prize data or sensible fallback.
+    Fetches the latest Thai lottery results from GLO Official (POST) or Rayriffy Open API.
+    Returns structured prize data and detailed status with timestamp.
     """
-    sources = [
-        "https://www.glo.or.th/api/lottery/getLatestLottery",
-        "https://lotto.api.rayriffy.com/latest"
-    ]
-    
-    for url in sources:
-        try:
-            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0 (compatible; ThaiLotteryBot/1.0)'})
-            with urllib.request.urlopen(req, timeout=5) as resp:
-                raw = json.loads(resp.read().decode('utf-8'))
-                
-                # Check GLO format
-                if "response" in raw and "data" in raw.get("response", {}):
-                    data = raw["response"]["data"]
-                    first_num = str(data.get("first", {}).get("number", "")).strip()
-                    last2_num = str(data.get("last2", {}).get("number", "")).strip()
-                    date_str = str(data.get("date", ""))
-                    if len(first_num) == 6:
-                        return {
-                            "status": "success",
-                            "source": "GLO Official",
-                            "date": date_str,
-                            "prize1": first_num,
-                            "top3": first_num[-3:],
-                            "top2": first_num[-2:],
-                            "bottom2": last2_num
-                        }
-                # Check Rayriffy format
-                elif "response" in raw and "prizes" in raw.get("response", {}):
-                    prizes = raw["response"].get("prizes", [])
-                    first_num = ""
-                    for p in prizes:
-                        if p.get("id") == "prizeFirst":
-                            first_num = str(p.get("number", [[""]])[0] if isinstance(p.get("number"), list) else p.get("number", "")).strip()
-                            
-                    running = raw["response"].get("runningNumbers", [])
-                    last2_num = ""
-                    for r in running:
-                        if r.get("id") == "runningNumberBackTwo":
-                            last2_num = str(r.get("number", [[""]])[0] if isinstance(r.get("number"), list) else r.get("number", "")).strip()
-                            
-                    if len(first_num) == 6:
-                        return {
-                            "status": "success",
-                            "source": "Rayriffy API",
-                            "date": str(raw.get("date", "")),
-                            "prize1": first_num,
-                            "top3": first_num[-3:],
-                            "top2": first_num[-2:],
-                            "bottom2": last2_num
-                        }
-        except Exception:
-            continue
+    import datetime
+    import ssl
+    now_th = datetime.datetime.now().strftime("%d/%m/%Y เวลา %H:%M น.")
+
+    try:
+        ssl_ctx = ssl.create_default_context()
+        ssl_ctx.check_hostname = False
+        ssl_ctx.verify_mode = ssl.CERT_NONE
+    except Exception:
+        ssl_ctx = None
+
+    # 1. GLO Official API (Requires POST with application/json)
+    try:
+        glo_url = "https://www.glo.or.th/api/lottery/getLatestLottery"
+        req = urllib.request.Request(
+            glo_url,
+            data=b"{}",
+            headers={
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Content-Type': 'application/json',
+                'Accept': 'application/json, text/plain, */*'
+            },
+            method="POST"
+        )
+        with urllib.request.urlopen(req, context=ssl_ctx, timeout=7) as resp:
+            raw = json.loads(resp.read().decode('utf-8'))
+            data = raw.get("response", {}).get("data", {})
+            first_num = str(data.get("first", {}).get("number", "")).strip()
+            last2_num = str(data.get("last2", {}).get("number", "")).strip()
+            date_str = str(data.get("date", "") or data.get("displayDate", "")).strip()
+            if len(first_num) == 6 and len(last2_num) == 2:
+                return {
+                    "status": "success",
+                    "source": "สำนักงานสลากกินแบ่งรัฐบาล (GLO Official API)",
+                    "date": date_str or "งวดล่าสุด",
+                    "prize1": first_num,
+                    "top3": first_num[-3:],
+                    "top2": first_num[-2:],
+                    "bottom2": last2_num,
+                    "fetched_at": now_th
+                }
+    except Exception as e:
+        print(f"⚠️ GLO API fetch error: {e}")
+
+    # 2. Rayriffy Thai Lottery API (GET)
+    try:
+        ray_url = "https://lotto.api.rayriffy.com/latest"
+        req = urllib.request.Request(
+            ray_url,
+            headers={
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'Accept': 'application/json'
+            }
+        )
+        with urllib.request.urlopen(req, context=ssl_ctx, timeout=7) as resp:
+            raw = json.loads(resp.read().decode('utf-8'))
+            response = raw.get("response", {})
+            date_str = str(response.get("date", "")).strip()
+            first_num = ""
+            last2_num = ""
             
-    # Fallback placeholder if offline / no internet connection
+            prizes = response.get("prizes", [])
+            for p in prizes:
+                pid = p.get("id", "")
+                pname = str(p.get("name", ""))
+                if pid == "prizeFirst" or "รางวัลที่ 1" in pname:
+                    nums = p.get("numbers") or p.get("number") or []
+                    if isinstance(nums, list) and nums:
+                        first_num = str(nums[0]).strip()
+                    elif isinstance(nums, str):
+                        first_num = nums.strip()
+                elif pid == "runningNumberBackTwo" or "เลขท้าย 2 ตัว" in pname or "2 ตัว" in pname:
+                    nums = p.get("numbers") or p.get("number") or []
+                    if isinstance(nums, list) and nums:
+                        last2_num = str(nums[0]).strip()
+                    elif isinstance(nums, str):
+                        last2_num = nums.strip()
+                        
+            running = response.get("runningNumbers", [])
+            for r in running:
+                rid = r.get("id", "")
+                rname = str(r.get("name", ""))
+                if rid == "runningNumberBackTwo" or "เลขท้าย 2 ตัว" in rname or "2 ตัว" in rname:
+                    nums = r.get("numbers") or r.get("number") or []
+                    if isinstance(nums, list) and nums:
+                        last2_num = str(nums[0]).strip()
+                    elif isinstance(nums, str):
+                        last2_num = nums.strip()
+
+            if len(first_num) == 6 and len(last2_num) >= 2:
+                return {
+                    "status": "success",
+                    "source": "Rayriffy Lottery Open API",
+                    "date": date_str or "งวดล่าสุด",
+                    "prize1": first_num,
+                    "top3": first_num[-3:],
+                    "top2": first_num[-2:],
+                    "bottom2": last2_num[:2],
+                    "fetched_at": now_th
+                }
+    except Exception as e:
+        print(f"⚠️ Rayriffy API fetch error: {e}")
+
+    # Fallback status if offline or lottery not drawn yet
     return {
-        "status": "manual_required",
-        "source": "None",
-        "date": "งวดล่าสุด",
+        "status": "offline",
+        "source": "ไม่สามารถติดต่อเซิร์ฟเวอร์สลากได้",
+        "date": "งวดปัจจุบัน",
         "prize1": "",
         "top3": "",
         "top2": "",
-        "bottom2": ""
+        "bottom2": "",
+        "fetched_at": now_th
     }
 
 def get_permutations_3(s: str) -> List[str]:
@@ -231,16 +281,61 @@ def render_prizes_page(period_id: Optional[int] = None, custom_prizes: Optional[
     p_id = selected_p["id"] if selected_p else 1
     p_name = selected_p["name"] if selected_p else "งวดปัจจุบัน"
     
+    import datetime
+    now_th = datetime.datetime.now().strftime("%d/%m/%Y เวลา %H:%M น.")
+
     prize_info = custom_prizes or {}
-    if not prize_info.get("top3") and not prize_info.get("bottom2"):
+    is_custom = bool(prize_info.get("top3") or prize_info.get("bottom2"))
+    
+    if not is_custom:
         fetched = fetch_latest_thai_lottery()
         top3 = fetched.get("top3", "")
         bottom2 = fetched.get("bottom2", "")
+        fetch_status = fetched.get("status", "offline")
         source_note = fetched.get("source", "เว็บสลากกินแบ่งฯ")
+        draw_date = fetched.get("date", p_name)
+        updated_at = fetched.get("fetched_at", now_th)
     else:
-        top3 = prize_info.get("top3", "")
-        bottom2 = prize_info.get("bottom2", "")
-        source_note = "กำหนดเอง"
+        top3 = prize_info.get("top3", "").strip()
+        bottom2 = prize_info.get("bottom2", "").strip()
+        fetch_status = "manual"
+        source_note = "กำหนดตัวเลขเองโดยผู้ใช้งาน (Manual Override)"
+        draw_date = p_name
+        updated_at = now_th
+
+    if fetch_status == "success":
+        banner_bg = "#f0fdf4"
+        banner_border = "#86efac"
+        banner_title = "🟢 ดึงผลรางวัลสลากกินแบ่งรัฐบาลล่าสุดสำเร็จแล้ว!"
+        banner_desc = f"📡 แหล่งข้อมูล: <b>{source_note}</b> &nbsp;|&nbsp; 📅 งวดประจำวันที่: <b>{draw_date}</b>"
+        badge_color = "#16a34a"
+    elif is_custom:
+        banner_bg = "#eff6ff"
+        banner_border = "#93c5fd"
+        banner_title = "✏️ กำลังตรวจในโหมดกำหนดตัวเลขเอง (Manual Input)"
+        banner_desc = f"ตรวจรางวัลด้วยเลขที่ระบุเอง: <b>3 ตัวบน = {top3 or '-'}</b> &nbsp;|&nbsp; <b>2 ตัวล่าง = {bottom2 or '-'}</b>"
+        badge_color = "#2563eb"
+    else:
+        banner_bg = "#fffbeb"
+        banner_border = "#fcd34d"
+        banner_title = "🟡 ยังไม่สามารถดึงผลอัตโนมัติจากกองสลากได้ในขณะนี้"
+        banner_desc = "💡 อาจยังไม่ออกผลประจำงวด หรือเซิร์ฟเวอร์สลากกำลังปรับปรุง — คุณสามารถ <b>พิมพ์เลข 3 ตัวบน และ 2 ตัวล่าง เองในช่องด้านล่าง</b> แล้วกด [🔍 ตรวจรางวัล] ได้ทันทีครับ"
+        badge_color = "#d97706"
+
+    status_banner_html = f"""
+    <div style="background:{banner_bg}; border:2px solid {banner_border}; padding:16px 20px; border-radius:14px; margin-bottom:20px; display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px; box-shadow:0 1px 3px rgba(0,0,0,0.05);">
+        <div>
+            <div style="font-size:16px; font-weight:800; color:{badge_color}; display:flex; align-items:center; gap:6px;">{banner_title}</div>
+            <div style="font-size:13px; color:#334155; margin-top:5px;">{banner_desc}</div>
+            <div style="font-size:12px; color:#64748b; margin-top:4px;">⏱️ อัปเดตล่าสุด: <b>{updated_at}</b></div>
+        </div>
+        <div>
+            <a href="/prizes?period_id={p_id}" style="background:{badge_color}; color:white; padding:10px 16px; border-radius:10px; text-decoration:none; font-weight:700; font-size:13px; display:inline-flex; align-items:center; gap:6px; box-shadow:0 2px 4px rgba(0,0,0,0.1);">
+                🔄 ดึงผลสดใหม่จากกองสลาก
+            </a>
+        </div>
+    </div>
+    """
 
     results = check_period_winners(p_id, top3, bottom2)
     
@@ -324,6 +419,8 @@ def render_prizes_page(period_id: Optional[int] = None, custom_prizes: Optional[
             </div>
         </div>
 
+        {status_banner_html}
+
         <div class="controls-card">
             <form method="GET" action="/prizes">
                 <div class="form-row">
@@ -343,9 +440,6 @@ def render_prizes_page(period_id: Optional[int] = None, custom_prizes: Optional[
                     </div>
                     <div>
                         <button type="submit" class="btn btn-check">🔍 ตรวจรางวัล</button>
-                    </div>
-                    <div>
-                        <a href="/prizes?period_id={p_id}&fetch=online" class="btn btn-fetch">🎲 ดึงผลล่าสุดจากเว็บ</a>
                     </div>
                 </div>
             </form>
