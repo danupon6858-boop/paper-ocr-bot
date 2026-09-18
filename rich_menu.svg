@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="2500" height="843" viewBox="0 0 2500 843">
+  <defs>
+    <linearGradient id="grad1" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1e3a8a"/>
+      <stop offset="100%" stop-color="#3b82f6"/>
+    </linearGradient>
+    <linearGradient id="grad2" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#991b1b"/>
+      <stop offset="100%" stop-color="#ef4444"/>
+    </linearGradient>
+    <linearGradient id="grad3" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#065f46"/>
+      <stop offset="100%" stop-color="#10b981"/>
+    </linearGradient>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="8" stdDeviation="12" flood-opacity="0.3"/>
+    </filter>
+  </defs>
+
+  <!-- Card 1: ดูตารางสด -->
+  <rect x="24" y="24" width="785" height="795" rx="36" fill="url(#grad1)" filter="url(#shadow)"/>
+  <rect x="24" y="24" width="785" height="795" rx="36" fill="none" stroke="rgba(255,255,255,0.2)" stroke-width="4"/>
+  <!-- Circle Icon Background -->
+  <circle cx="416" cy="280" r="120" fill="rgba(255,255,255,0.15)"/>
+  <text x="416" y="325" font-size="130" text-anchor="middle">🌐</text>
+  <text x="416" y="510" font-size="68" font-weight="800" fill="#ffffff" text-anchor="middle" font-family="'Prompt', 'Thonburi', sans-serif">ดูตารางสด</text>
+  <text x="416" y="585" font-size="36" font-weight="500" fill="#bfdbfe" text-anchor="middle" font-family="'Prompt', 'Thonburi', sans-serif">อัปเดตเรียลไทม์ &amp; สถิติชุดที่ 1</text>
+  <rect x="316" y="650" width="200" height="56" rx="28" fill="#ffffff"/>
+  <text x="416" y="690" font-size="30" font-weight="700" fill="#1e3a8a" text-anchor="middle" font-family="'Prompt', 'Thonburi', sans-serif">คลิกเปิดเว็บ ➔</text>
+
+  <!-- Card 2: ตรวจรางวัล -->
+  <rect x="857" y="24" width="785" height="795" rx="36" fill="url(#grad2)" filter="url(#shadow)"/>
+  <rect x="857" y="24" width="785" height="795" rx="36" fill="none" stroke="rgba(255,255,255,0.2)" stroke-width="4"/>
+  <circle cx="1250" cy="280" r="120" fill="rgba(255,255,255,0.15)"/>
+  <text x="1250" y="325" font-size="130" text-anchor="middle">🎰</text>
+  <text x="1250" y="510" font-size="68" font-weight="800" fill="#ffffff" text-anchor="middle" font-family="'Prompt', 'Thonburi', sans-serif">ตรวจรางวัล</text>
+  <text x="1250" y="585" font-size="36" font-weight="500" fill="#fecaca" text-anchor="middle" font-family="'Prompt', 'Thonburi', sans-serif">ตรวจหวยอัตโนมัติ &amp; สรุปผู้ถูกรางวัล</text>
+  <rect x="1150" y="650" width="200" height="56" rx="28" fill="#ffffff"/>
+  <text x="1250" y="690" font-size="30" font-weight="700" fill="#991b1b" text-anchor="middle" font-family="'Prompt', 'Thonburi', sans-serif">เช็คผลสด ➔</text>
+
+  <!-- Card 3: วิธีใช้งาน -->
+  <rect x="1690" y="24" width="785" height="795" rx="36" fill="url(#grad3)" filter="url(#shadow)"/>
+  <rect x="1690" y="24" width="785" height="795" rx="36" fill="none" stroke="rgba(255,255,255,0.2)" stroke-width="4"/>
+  <circle cx="2082" cy="280" r="120" fill="rgba(255,255,255,0.15)"/>
+  <text x="2082" y="325" font-size="130" text-anchor="middle">❓</text>
+  <text x="2082" y="510" font-size="68" font-weight="800" fill="#ffffff" text-anchor="middle" font-family="'Prompt', 'Thonburi', sans-serif">วิธีใช้งาน</text>
+  <text x="2082" y="585" font-size="36" font-weight="500" fill="#a7f3d0" text-anchor="middle" font-family="'Prompt', 'Thonburi', sans-serif">คู่มือคำสั่ง &amp; วิธีส่งกระดาษ</text>
+  <rect x="1982" y="650" width="200" height="56" rx="28" fill="#ffffff"/>
+  <text x="2082" y="690" font-size="30" font-weight="700" fill="#065f46" text-anchor="middle" font-family="'Prompt', 'Thonburi', sans-serif">อ่านคู่มือ ➔</text>
+</svg>

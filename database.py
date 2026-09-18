@@ -1002,3 +1002,87 @@ def get_staff_and_peak_metrics(period_id: Optional[int] = None) -> dict:
         "workers": workers
     }
 
+# ==================== DEEP SEARCH ====================
+def deep_search_set1(num_query: str, period_id: Optional[int] = None) -> dict:
+    """
+    Searches for exact matches of set1 across entries joined with sheets.
+    Returns:
+      - query: cleaned search string
+      - total_count: number of matches
+      - total_volume: sum of set2 amounts
+      - cat_breakdown: {'บน': count, 'ล่าง': count, 'บนล่าง': count}
+      - matches: list of entry details with image_path
+    """
+    init_db()
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    clean_q = re.sub(r'[^\d?]', '', str(num_query)).strip()
+    if not clean_q:
+        conn.close()
+        return {"query": num_query, "total_count": 0, "total_volume": 0.0, "cat_breakdown": {}, "matches": []}
+        
+    query_sql = """
+    SELECT e.id, e.period_id, e.sheet_id, e.employee_name, e.worker_code,
+           e.category, e.set1, e.set2, e.set3, e.raw_text, s.created_at,
+           s.image_path, p.name as period_name
+    FROM entries e
+    LEFT JOIN sheets s ON e.sheet_db_id = s.id
+    LEFT JOIN periods p ON e.period_id = p.id
+    WHERE e.set1 = ?
+    """
+    params = [clean_q]
+    if period_id is not None:
+        query_sql += " AND e.period_id = ?"
+        params.append(period_id)
+        
+    query_sql += " ORDER BY e.id DESC LIMIT 100"
+    
+    cursor.execute(query_sql, tuple(params))
+    rows = cursor.fetchall()
+    conn.close()
+    
+    cat_counts = {"บน": 0, "ล่าง": 0, "บนล่าง": 0}
+    total_volume = 0.0
+    matches = []
+    
+    for r in rows:
+        cat = r["category"]
+        if cat in cat_counts:
+            cat_counts[cat] += 1
+            
+        s2 = r["set2"] or ""
+        try:
+            if "x" in s2.lower():
+                parts = s2.lower().split("x")
+                vol = sum(float(re.sub(r'[^\d.]', '', p)) for p in parts if re.sub(r'[^\d.]', '', p))
+            else:
+                vol = float(re.sub(r'[^\d.]', '', s2)) if re.sub(r'[^\d.]', '', s2) else 0.0
+            total_volume += vol
+        except Exception:
+            pass
+            
+        matches.append({
+            "id": r["id"],
+            "period_name": r["period_name"] or f"งวด {r['period_id']}",
+            "sheet_id": r["sheet_id"],
+            "employee_name": r["employee_name"],
+            "worker_code": r["worker_code"] or "A",
+            "category": cat,
+            "set1": r["set1"],
+            "set2": r["set2"],
+            "set3": r["set3"],
+            "raw_text": r["raw_text"],
+            "image_path": r["image_path"] or "",
+            "created_at": r["created_at"]
+        })
+        
+    return {
+        "query": clean_q,
+        "total_count": len(matches),
+        "total_volume": total_volume,
+        "cat_breakdown": cat_counts,
+        "matches": matches
+    }
+
+

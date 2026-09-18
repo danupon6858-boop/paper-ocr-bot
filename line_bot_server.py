@@ -570,6 +570,9 @@ def handle_image_message(message_id: str, reply_token: str, user_id: str, user_i
 
         # Save uploaded image to disk for training archive and dashboard viewing
         image_path = database.save_uploaded_image(img_bytes, active_p["id"], formatted_sheet_id)
+        if image_path:
+            import gdrive_sync
+            gdrive_sync.trigger_image_backup(image_path)
 
         # 2. Check Duplicate Sheet
         is_dup, dup_msg = database.check_duplicate_sheet(
@@ -774,6 +777,8 @@ def handle_text_message(text: str, reply_token: str, user_id: str, is_owner: boo
             confirmed = database.confirm_pending_scan(scan["id"]) if scan else None
             
         if confirmed:
+            import gdrive_sync
+            gdrive_sync.trigger_db_backup()
             active_p = database.get_active_period()
             p_name = active_p["name"] if active_p else "งวดปัจจุบัน"
             msg = (
@@ -835,7 +840,7 @@ def handle_text_message(text: str, reply_token: str, user_id: str, is_owner: boo
         return
         
     # 8. Help menu
-    if clean_text in ["เมนู", "menu", "help", "?"]:
+    if clean_text in ["เมนู", "menu", "help", "?", "วิธีใช้งาน", "คู่มือ", "คำแนะนำ"]:
         help_msg = (
             "📋 เมนูการใช้งานระบบ\n"
             "─────────────────────────\n"
@@ -1347,6 +1352,8 @@ def render_html_dashboard(period_id: Optional[int] = None, scope: str = "period"
             <div style="font-size: 13px; color:#64748b; margin-top:4px;">ระบบวิเคราะห์ตัวเลขชุดที่ 1 & ตรวจจับความแม่นยำ AI เรียลไทม์</div>
         </div>
         <div style="display:flex; gap:8px; flex-wrap:wrap;">
+            <a href="/prizes?period_id={p_id}" style="background:#dc2626; color:white; border:none; padding:10px 16px; border-radius:10px; font-weight:700; text-decoration:none; font-size:13px; display:inline-flex; align-items:center; gap:6px; box-shadow:0 2px 4px rgba(220,38,38,0.2);">🎰 ตรวจผลรางวัล</a>
+            <a href="/backup-gdrive" style="background:#0284c7; color:white; border:none; padding:10px 16px; border-radius:10px; font-weight:700; text-decoration:none; font-size:13px; display:inline-flex; align-items:center; gap:6px;">☁️ สำรอง Google Drive</a>
             <a href="/export?period_id={p_id}" class="btn-export" download>📥 ดาวน์โหลด Excel (.CSV)</a>
             <a href="/export-ai-dataset?period_id={p_id}" class="btn-dataset" download>💾 ดาวน์โหลด AI Dataset (.JSON)</a>
         </div>
@@ -1398,9 +1405,13 @@ def render_html_dashboard(period_id: Optional[int] = None, scope: str = "period"
             </div>
         </div>
 
-        <div class="search-box">
-            <input type="text" id="searchInput" class="search-input" placeholder="🔍 พิมพ์ค้นหาตัวเลขในงวดนี้ เช่น 401, 370, 12..." onkeyup="filterTable()">
+        <div class="search-box" style="display:flex; gap:8px; align-items:center;">
+            <input type="text" id="searchInput" class="search-input" placeholder="🔍 ค้นหาเลขในตารางสด หรือพิมพ์เลขแล้วกดเจาะลึก (เช่น 401, 370, 12)..." onkeyup="filterTable()" onkeypress="if(event.key==='Enter') executeDeepSearch()" style="flex:1;">
+            <button type="button" onclick="executeDeepSearch()" style="background:#2563eb; color:white; border:none; padding:12px 18px; border-radius:10px; font-weight:700; font-size:14px; cursor:pointer; display:inline-flex; align-items:center; gap:6px; white-space:nowrap; box-shadow:0 2px 4px rgba(37,99,235,0.2);">
+                🔎 เจาะลึกเลขนี้
+            </button>
         </div>
+        <div id="deepSearchResult" style="display:none; margin-bottom:16px; background:white; border:2px solid #3b82f6; border-radius:12px; padding:16px; box-shadow:0 4px 6px -1px rgba(0,0,0,0.1);"></div>
 
         <div class="table-container">
             <table id="dataTable">
@@ -1621,6 +1632,73 @@ def render_html_dashboard(period_id: Optional[int] = None, scope: str = "period"
                 }}
             }}
         }}
+
+        async function executeDeepSearch() {{
+            var q = document.getElementById('searchInput').value.trim();
+            var resBox = document.getElementById('deepSearchResult');
+            if (!q) {{
+                alert('กรุณาพิมพ์เลขที่ต้องการค้นหาก่อน เช่น 401 หรือ 12');
+                return;
+            }}
+            resBox.style.display = 'block';
+            resBox.innerHTML = '<div style="text-align:center; padding:12px; color:#64748b;">⏳ กำลังสแกนค้นหาเลข ' + q + ' ในทุกใบของงวดนี้...</div>';
+            
+            try {{
+                const resp = await fetch('/api/search?q=' + encodeURIComponent(q) + '&period_id={p_id}');
+                const data = await resp.json();
+                
+                if (!data.matches || data.matches.length === 0) {{
+                    resBox.innerHTML = '<div style="display:flex; justify-content:space-between; align-items:center;">' +
+                        '<span style="font-weight:700; color:#dc2626;">❌ ไม่พบเลข "' + data.query + '" ในงวดนี้</span>' +
+                        '<button onclick="document.getElementById(\'deepSearchResult\').style.display=\'none\'" style="background:none; border:none; font-size:16px; cursor:pointer; color:#94a3b8;">✕ ปิด</button>' +
+                    '</div>';
+                    return;
+                }}
+                
+                let matchesHtml = data.matches.map(function(m) {{
+                    let imgHtml = m.image_path ? '<a href="' + m.image_path + '" target="_blank" style="background:#eff6ff; color:#2563eb; padding:4px 10px; border-radius:6px; font-size:12px; font-weight:700; text-decoration:none; border:1px solid #bfdbfe;">📷 ดูรูปหลักฐาน</a>' : '<span style="color:#94a3b8; font-size:12px;">ไม่มีรูป</span>';
+                    let s3Html = m.set3 ? ' <small style="color:#d97706">(' + m.set3 + ')</small>' : '';
+                    return '<tr style="border-bottom:1px solid #f1f5f9;">' +
+                        '<td style="padding:8px 12px; font-weight:700; color:#0f172a;">ใบที่ ' + m.sheet_id + ' (' + (m.worker_code || m.employee_name) + ')</td>' +
+                        '<td style="padding:8px 12px;"><span style="background:#e0e7ff; color:#3730a3; padding:2px 8px; border-radius:6px; font-size:12px; font-weight:700;">' + m.category + '</span></td>' +
+                        '<td style="padding:8px 12px; font-size:16px; font-weight:800; color:#2563eb;">' + m.set1 + '</td>' +
+                        '<td style="padding:8px 12px; font-weight:700; color:#059669;">' + m.set2 + s3Html + '</td>' +
+                        '<td style="padding:8px 12px; text-align:right;">' + imgHtml + '</td>' +
+                    '</tr>';
+                }}).join('');
+
+                resBox.innerHTML = '<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">' +
+                    '<div>' +
+                        '<span style="font-size:18px; font-weight:800; color:#1e40af;">🔍 ผลการเจาะลึกเลข "' + data.query + '"</span>' +
+                        '<span style="margin-left:8px; font-size:13px; color:#64748b;">(พบทั้งหมด <b>' + data.total_count + '</b> จุด | ยอดรวม <b>' + Number(data.total_volume).toLocaleString() + '</b> บาท)</span>' +
+                    '</div>' +
+                    '<button onclick="document.getElementById(\'deepSearchResult\').style.display=\'none\'" style="background:#f1f5f9; border:none; border-radius:6px; padding:4px 10px; font-size:13px; cursor:pointer; color:#475569; font-weight:700;">✕ ปิดหน้าต่างนี้</button>' +
+                '</div>' +
+                '<div style="display:flex; gap:8px; margin-bottom:12px; flex-wrap:wrap;">' +
+                    '<span style="background:#eff6ff; color:#1d4ed8; padding:4px 10px; border-radius:6px; font-size:12px; font-weight:700;">บน: ' + (data.cat_breakdown['บน'] || 0) + '</span>' +
+                    '<span style="background:#fef2f2; color:#b91c1c; padding:4px 10px; border-radius:6px; font-size:12px; font-weight:700;">ล่าง: ' + (data.cat_breakdown['ล่าง'] || 0) + '</span>' +
+                    '<span style="background:#f5f3ff; color:#6d28d9; padding:4px 10px; border-radius:6px; font-size:12px; font-weight:700;">บนล่าง: ' + (data.cat_breakdown['บนล่าง'] || 0) + '</span>' +
+                '</div>' +
+                '<div style="max-height:280px; overflow-y:auto; border:1px solid #e2e8f0; border-radius:8px;">' +
+                    '<table style="width:100%; border-collapse:collapse; font-size:13px;">' +
+                        '<thead style="background:#f8fafc; position:sticky; top:0;">' +
+                            '<tr>' +
+                                '<th style="padding:8px 12px; text-align:left;">ใบที่ / ผู้ส่ง</th>' +
+                                '<th style="padding:8px 12px; text-align:left;">หมวด</th>' +
+                                '<th style="padding:8px 12px; text-align:left;">เลขชุด 1</th>' +
+                                '<th style="padding:8px 12px; text-align:left;">ยอด (Set 2)</th>' +
+                                '<th style="padding:8px 12px; text-align:right;">หลักฐาน</th>' +
+                            '</tr>' +
+                        '</thead>' +
+                        '<tbody>' +
+                            matchesHtml +
+                        '</tbody>' +
+                    '</table>' +
+                '</div>';
+            }} catch (err) {{
+                resBox.innerHTML = '<div style="color:#dc2626; padding:10px;">❌ เกิดข้อผิดพลาดในการดึงข้อมูล: ' + err.message + '</div>';
+            }}
+        }}
     </script>
 </body>
 </html>
@@ -1742,7 +1820,97 @@ class LineWebhookHandler(http.server.BaseHTTPRequestHandler):
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.end_headers()
                 self.wfile.write(html)
-                return
+        if path == "/prizes":
+            import prize_service
+            p_id = int(qs.get("period_id", [0])[0]) or None
+            top3 = qs.get("top3", [""])[0]
+            bottom2 = qs.get("bottom2", [""])[0]
+            custom_p = None
+            if top3 or bottom2:
+                custom_p = {"top3": top3, "bottom2": bottom2}
+            html = prize_service.render_prizes_page(p_id, custom_p).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(html)
+            return
+
+        if path == "/api/search":
+            q_num = qs.get("q", [""])[0].strip()
+            p_id = int(qs.get("period_id", [0])[0]) or None
+            results = database.deep_search_set1(q_num, p_id)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(json.dumps(results, ensure_ascii=False).encode("utf-8"))
+            return
+
+        if path == "/setup-rich-menu":
+            import setup_rich_menu
+            success = setup_rich_menu.setup_rich_menu()
+            status_msg = "✅ ติดตั้ง LINE Rich Menu (3 ปุ่ม) สำเร็จเรียบร้อยแล้ว!" if success else "❌ การติดตั้งไม่สำเร็จ กรุณาตรวจเช็ค LOG ใน Render หรือ LINE_CHANNEL_ACCESS_TOKEN"
+            res_html = f"""<!DOCTYPE html>
+<html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'><title>Setup Rich Menu</title>
+<style>body{{font-family:sans-serif;background:#f8fafc;padding:40px;text-align:center;}}
+.box{{background:white;padding:30px;border-radius:16px;max-width:500px;margin:auto;box-shadow:0 4px 6px rgba(0,0,0,0.05);}}
+a{{display:inline-block;margin-top:20px;padding:10px 20px;background:#2563eb;color:white;text-decoration:none;border-radius:8px;font-weight:700;}}
+</style></head>
+<body><div class='box'><h2>{status_msg}</h2><a href='/'>กลับสู่หน้าหลัก Dashboard</a></div></body></html>""".encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(res_html)
+            return
+
+        if path == "/backup-gdrive":
+            import gdrive_sync
+            trigger = qs.get("trigger", ["0"])[0]
+            msg = "☁️ ระบบสำรองข้อมูลอัตโนมัติ Google Drive 5TB"
+            if trigger == "1":
+                gdrive_sync._do_backup_db()
+                msg = "✅ สั่งสำรอง records.db ขึ้น Google Drive เรียบร้อย!"
+            
+            configured = gdrive_sync.is_configured()
+            cfg_badge = "<span style='color:#16a34a; font-weight:700;'>🟢 เชื่อมต่อ Google Apps Script แล้ว</span>" if configured else "<span style='color:#dc2626; font-weight:700;'>🔴 ยังไม่ได้ใส่ GDRIVE_SYNC_URL ใน Render</span>"
+            script_code = gdrive_sync.GOOGLE_APPS_SCRIPT_CODE.strip()
+            
+            gdrive_html = f"""<!DOCTYPE html>
+<html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'><title>Google Drive Backup</title>
+<style>
+body{{font-family:sans-serif;background:#f8fafc;padding:24px;margin:0;color:#1e293b;}}
+.box{{background:white;padding:24px;border-radius:16px;max-width:680px;margin:auto;box-shadow:0 4px 6px rgba(0,0,0,0.05);}}
+pre{{background:#0f172a;color:#38bdf8;padding:14px;border-radius:10px;font-size:12px;overflow-x:auto;text-align:left;}}
+a.btn{{display:inline-block;padding:10px 18px;background:#2563eb;color:white;text-decoration:none;border-radius:8px;font-weight:700;margin-right:8px;}}
+</style></head>
+<body>
+<div class='box'>
+    <h2>☁️ สำรองข้อมูลอัตโนมัติ Google Drive 5TB</h2>
+    <p style='margin:6px 0 14px 0; font-size:14px;'>{msg}</p>
+    <p>สถานะการเชื่อมต่อ: {cfg_badge}</p>
+    <div style='margin:16px 0;'>
+        <a href='/backup-gdrive?trigger=1' class='btn' style='background:#059669;'>📤 สั่งสำรอง DB ตอนนี้ทันที</a>
+        <a href='/' class='btn' style='background:#64748b;'>กลับหน้าหลัก Dashboard</a>
+    </div>
+    <div style='text-align:left; background:#eff6ff; padding:16px; border-radius:10px; font-size:13px; line-height:1.6;'>
+        <b>📌 วิธีเชื่อมต่อ Google Drive 5TB แบบง่ายที่สุด (ทำครั้งเดียวเสร็จ):</b>
+        <ol>
+            <li>เข้าเว็บ <b>script.google.com</b> ด้วยบัญชี Google ที่มี Drive 5TB</li>
+            <li>กด <b>New Project</b> แล้วนำโค้ดด้านล่างนี้ไปวางทับทั้งหมด</li>
+            <li>กดปุ่ม <b>Deploy</b> ➔ <b>New deployment</b> ➔ เลือกชนิด <b>Web app</b></li>
+            <li>ตั้งค่า: <i>Execute as: Me</i> และ <i>Who has access: Anyone</i></li>
+            <li>กด Deploy แล้วคัดลอก URL เว็บแอป (https://script.google.com/macros/s/.../exec)</li>
+            <li>นำ URL นั้นไปใส่ใน Environment Variables ของ Render ชื่อ <b>GDRIVE_SYNC_URL</b></li>
+        </ol>
+    </div>
+    <h4 style='text-align:left; margin-top:20px;'>📋 โค้ด Google Apps Script (พร้อมใช้งานทันที):</h4>
+    <pre>{script_code}</pre>
+</div>
+</body></html>""".encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(gdrive_html)
+            return
 
         # Default: Dashboard
         p_id = int(qs.get("period_id", [0])[0]) or None
@@ -1835,6 +2003,9 @@ class LineWebhookHandler(http.server.BaseHTTPRequestHandler):
                         
                 database.update_pending_scan_items(scan_id, new_columns)
                 confirmed = database.confirm_pending_scan(scan_id)
+                if confirmed:
+                    import gdrive_sync
+                    gdrive_sync.trigger_db_backup()
                 
                 success_html = """<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>บันทึกสำเร็จ</title><style>body{background:#f8fafc;font-family:sans-serif;padding:30px;text-align:center;}.card{background:white;padding:30px;border-radius:16px;max-width:400px;margin:auto;box-shadow:0 2px 5px rgba(0,0,0,0.1);}</style></head><body><div class="card"><h1 style="color:#16a34a;margin:0;">✅ บันทึกสำเร็จ!</h1><p style="color:#64748b;margin:15px 0;">ข้อมูลของคุณได้รับการแก้ไขและยืนยันเข้าระบบเรียบร้อยแล้ว</p><a href="https://line.me" style="display:inline-block;background:#06c755;color:white;padding:12px 24px;border-radius:10px;text-decoration:none;font-weight:700;">กลับไปที่ LINE</a></div></body></html>""".encode("utf-8")
                 self.send_response(200)
@@ -1916,6 +2087,9 @@ class LineWebhookHandler(http.server.BaseHTTPRequestHandler):
             print(f"Error handling event: {e}")
 
 def run_server():
+    import gdrive_sync
+    gdrive_sync.restore_db_from_gdrive()
+    database.init_db()
     server_cls = getattr(http.server, "ThreadingHTTPServer", http.server.HTTPServer)
     server = server_cls(("0.0.0.0", PORT), LineWebhookHandler)
     print(f"🚀 LINE Bot Server running on port {PORT} (Threaded)...")

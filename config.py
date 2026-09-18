@@ -15,3 +15,5 @@ PRE_APPROVED_USERS = [
 ]
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "records.db")
+BASE_URL = os.environ.get("BASE_URL", "https://paper-ocr-bot.onrender.com")
+
