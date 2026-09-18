@@ -171,39 +171,29 @@ def get_line_image_content(message_id: str) -> bytes:
 def format_clean_editable_text(sheet_num: str, columns: dict) -> str:
     lines = [f"ใบที่ {sheet_num}"]
     
-    top_items = columns.get("top", [])
-    if top_items:
-        lines.append("[บน]")
-        for itm in top_items:
-            s1 = itm.get("set1", "").strip()
-            s3 = itm.get("set3", "").strip()
-            s3_part = f"{s3} " if s3 else ""
-            s2 = itm.get("set2", "").strip()
-            lines.append(f"{s1} = {s3_part}{s2}".strip())
-        lines.append("")
-        
-    bot_items = columns.get("bottom", [])
-    if bot_items:
-        lines.append("[ล่าง]")
-        for itm in bot_items:
-            s1 = itm.get("set1", "").strip()
-            s3 = itm.get("set3", "").strip()
-            s3_part = f"{s3} " if s3 else ""
-            s2 = itm.get("set2", "").strip()
-            lines.append(f"{s1} = {s3_part}{s2}".strip())
-        lines.append("")
-        
-    topbot_items = columns.get("top_bottom", [])
-    if topbot_items:
-        lines.append("[บนล่าง]")
-        for itm in topbot_items:
-            s1 = itm.get("set1", "").strip()
-            s3 = itm.get("set3", "").strip()
-            s3_part = f"{s3} " if s3 else ""
-            s2 = itm.get("set2", "").strip()
-            lines.append(f"{s1} = {s3_part}{s2}".strip())
-        lines.append("")
-        
+    for col_key, col_title in [("top", "[บน]"), ("bottom", "[ล่าง]"), ("top_bottom", "[บนล่าง]")]:
+        items = columns.get(col_key, [])
+        if items:
+            lines.append(col_title)
+            for itm in items:
+                s1 = str(itm.get("set1") or "").strip()
+                s3 = str(itm.get("set3") or "").strip()
+                s3_part = f"{s3} " if s3 else ""
+                s2 = str(itm.get("set2") or "").strip()
+                confidence = str(itm.get("confidence") or "high").strip().lower()
+                note = str(itm.get("uncertain_note") or "").strip()
+                
+                # Flag uncertain or question-mark items
+                if confidence == "low" or "?" in s1 or "?" in s2 or note:
+                    warn_tag = "⚠️ "
+                    note_tag = f"  <-- ({note})" if note else ""
+                else:
+                    warn_tag = ""
+                    note_tag = ""
+                    
+                lines.append(f"{warn_tag}{s1} = {s3_part}{s2}{note_tag}".strip())
+            lines.append("")
+            
     return "\n".join(lines).strip()
 
 COL_MAP = {
@@ -244,18 +234,24 @@ def detect_column_header(line: str) -> Optional[str]:
 def parse_entries_from_line(line: str) -> list:
     """Intelligently tokenizes and extracts 1 or more entries from a line.
     
-    Identifies set1 (2-4 digits), set3 ('ก3' or 'ก6'), and set2 (amount or NxN).
+    Identifies set1 (2-4 digits/question marks), set3 ('ก3' or 'ก6'), and set2 (amount or NxN).
     Supports all common separators (=, -, :, /, whitespace, comma, semicolon).
+    Safely ignores notes like <-- (...) and emojis.
     """
     line = line.strip()
     if not line:
         return []
 
+    # Strip annotations like <-- (...) or (...) and warning emojis before tokenizing
+    line = re.sub(r'<--.*$', '', line)
+    line = re.sub(r'\(.*?\)', '', line)
+    line = line.replace('⚠️', '').replace('❗', '').strip()
+
     # Normalize NxN formats (e.g. 120 X 120 -> 120x120)
-    normalized = re.sub(r'(\d+)\s*[xX]\s*(\d+)', r'\1x\2', line)
+    normalized = re.sub(r'([\d?]+)\s*[xX]\s*([\d?]+)', r'\1x\2', line)
     # Split stuck special codes (e.g. 401ก350 -> 401 ก3 50)
-    normalized = re.sub(r'(\d+)(ก[36])', r'\1 \2 ', normalized)
-    normalized = re.sub(r'(ก[36])(\d+)', r' \1 \2', normalized)
+    normalized = re.sub(r'([\d?]+)(ก[36])', r'\1 \2 ', normalized)
+    normalized = re.sub(r'(ก[36])([\d?]+)', r' \1 \2', normalized)
 
     sub_chunks = re.split(r'[,;]+', normalized)
     entries = []
@@ -265,16 +261,16 @@ def parse_entries_from_line(line: str) -> list:
         if not chunk:
             continue
             
-        # Extract meaningful tokens: special codes, NxN, or numeric blocks
-        tokens = re.findall(r'(ก[36]|\d+x\d+|\d+)', chunk)
+        # Extract meaningful tokens: special codes, NxN, or numeric blocks (supporting '?')
+        tokens = re.findall(r'(ก[36]|[\d?]+x[\d?]+|[\d?]+)', chunk)
         if not tokens:
             continue
             
         i = 0
         while i < len(tokens):
             tok = tokens[i]
-            # set1 must be 2-4 digits
-            if re.fullmatch(r'\d{2,4}', tok):
+            # set1 must be 2-4 digits or '?' (e.g. 40?)
+            if re.fullmatch(r'[\d?]{2,4}', tok):
                 s1 = tok
                 s3 = ""
                 s2 = ""
@@ -285,19 +281,27 @@ def parse_entries_from_line(line: str) -> list:
                     if next_tok in ("ก3", "ก6"):
                         s3 = next_tok
                         i += 1
-                        if i < len(tokens) and re.fullmatch(r'\d+', tokens[i]):
+                        if i < len(tokens) and re.fullmatch(r'[\d?]+', tokens[i]):
                             s2 = tokens[i]
                             i += 1
-                    elif re.fullmatch(r'\d+x\d+', next_tok):
+                    elif re.fullmatch(r'[\d?]+x[\d?]+', next_tok):
                         s2 = next_tok
                         i += 1
-                    elif re.fullmatch(r'\d+', next_tok):
+                    elif re.fullmatch(r'[\d?]+', next_tok):
                         s2 = next_tok
                         i += 1
                 
+                confidence = "low" if ("?" in s1 or "?" in s2) else "high"
                 s3_part = f"{s3} " if s3 else ""
                 raw = f"{s1} = {s3_part}{s2}".strip() if (s2 or s3) else s1
-                entries.append({"set1": s1, "set2": s2, "set3": s3, "raw_text": raw})
+                entries.append({
+                    "set1": s1,
+                    "set2": s2,
+                    "set3": s3,
+                    "raw_text": raw,
+                    "confidence": confidence,
+                    "uncertain_note": ""
+                })
             else:
                 i += 1
                 
@@ -345,7 +349,7 @@ def parse_sheet_text(text: str) -> Optional[dict]:
 
 
 def handle_delete_command(text: str, user_id: str, reply_token: str) -> bool:
-    m = re.match(r"^ลบ\s+(\d+)(?:[=\s].*)?$", text.strip())
+    m = re.match(r"^ลบ\s+([A-Za-z0-9?]+)(?:[=\s].*)?$", text.strip())
     if not m:
         return False
     target_num = m.group(1).strip()
@@ -393,7 +397,7 @@ def handle_delete_command(text: str, user_id: str, reply_token: str) -> bool:
 
 
 def handle_edit_command(text: str, user_id: str, reply_token: str) -> bool:
-    m = re.match(r"^แก้\s+(\d+(?:[=\s][^\s]+)?)\s+เป็น\s+(.+)$", text.strip())
+    m = re.match(r"^แก้\s+([A-Za-z0-9?]+(?:[=\s][^\s]+)?)\s+เป็น\s+(.+)$", text.strip())
     if not m:
         return False
     old_target = m.group(1).strip()
@@ -443,6 +447,9 @@ def handle_edit_command(text: str, user_id: str, reply_token: str) -> bool:
                     s3_p = f"{s3} " if s3 else ""
                     s2 = updated_itm.get("set2", "")
                     updated_itm["raw_text"] = f"{updated_itm['set1']} = {s3_p}{s2}".strip()
+                # Clear uncertainty flags once edited manually
+                updated_itm["confidence"] = "high"
+                updated_itm["uncertain_note"] = ""
                 new_cols[c].append(updated_itm)
             else:
                 new_cols[c].append(itm)
@@ -540,20 +547,43 @@ def handle_image_message(message_id: str, reply_token: str, user_id: str, user_i
         top_items = valid_cols.get("top", [])
         bot_items = valid_cols.get("bottom", [])
         topbot_items = valid_cols.get("top_bottom", [])
-        total_items = len(top_items) + len(bot_items) + len(topbot_items)
+        all_items = top_items + bot_items + topbot_items
+        total_items = len(all_items)
         
+        uncertain_count = sum(1 for itm in all_items if itm.get("confidence") == "low" or itm.get("uncertain_note") or "?" in str(itm.get("set1", "")) or "?" in str(itm.get("set2", "")))
+        clear_count = total_items - uncertain_count
+        
+        if uncertain_count > 0:
+            summary_badge = f"📊 ตรวจพบ: {total_items} ชุด (✅ ชัดเจน: {clear_count} | ⚠️ ไม่มั่นใจ: {uncertain_count} ชุด)"
+            hint_block = (
+                f"⚠️ มี {uncertain_count} ชุดที่ AI ไม่มั่นใจ (มีเครื่องหมาย ⚠️)\n"
+                f"💡 คัดลอกข้อความไปแก้ตัวเลข หรือพิมพ์ 'แก้ [เลขเดิม] เป็น [เลขใหม่]' ได้เลยครับ\n"
+                f"✅ หากตรวจสอบแล้วถูกต้อง: กดปุ่ม [ ยืนยัน ] ได้ทันทีครับ"
+            )
+        else:
+            summary_badge = f"📊 รวมทั้งหมด: {total_items} ชุด (✅ ชัดเจนครบทุกชุด)"
+            hint_block = (
+                f"✅ หากถูกต้อง: กดปุ่ม [ ยืนยัน ] ด้านล่างได้เลยครับ\n"
+                f"✏️ หากต้องการแก้ไข: คัดลอกข้อความนี้ไปแก้/ลบตัวเลข แล้วส่งกลับมาได้ทันทีครับ"
+            )
+            
+        unclear_notes = ocr_result.get("unclear_notes", []) if isinstance(ocr_result, dict) else []
+        unclear_block = ""
+        if unclear_notes:
+            unclear_block = "⚠️ จุดที่ AI สังเกตว่าไม่ชัดเจน:\n" + "\n".join(f"• {n}" for n in unclear_notes[:3]) + "\n─────────────────────────\n"
+
         # Combine summary header, clean editable numbers, and instructions into 1 single message bubble
         clean_text = format_clean_editable_text(raw_sheet_id, valid_cols)
         
         combined_text = (
             f"📌 ข้อมูลนี้จะถูกบันทึกลงใน: {active_p['name']}\n"
             f"📋 อ่านข้อมูลได้ [ใบที่: {formatted_sheet_id}]\n"
-            f"📊 รวมทั้งหมด: {total_items} รายการ | ผู้ส่ง: {emp_name} ({worker_code})\n"
+            f"{summary_badge} | ผู้ส่ง: {emp_name} ({worker_code})\n"
             f"─────────────────────────\n"
             f"{clean_text}\n"
             f"─────────────────────────\n"
-            f"✅ หากถูกต้อง: กดปุ่ม [ ยืนยัน ] ด้านล่างได้เลยครับ\n"
-            f"✏️ หากต้องการแก้ไข: คัดลอกข้อความนี้ไปแก้/ลบตัวเลข แล้วส่งกลับมาได้ทันทีครับ"
+            f"{unclear_block}"
+            f"{hint_block}"
         )
         
         quick_replies = [
@@ -812,7 +842,7 @@ def handle_text_message(text: str, reply_token: str, user_id: str, is_owner: boo
         clean_text_out = format_clean_editable_text(sheet_id, cols)
         preview_msg = (
             f"✏️ ตรวจสอบข้อมูลที่แก้ไขแล้ว:\n"
-            f"📋 ใบที่: {sheet_id} | 📊 {total_c} รายการ (บน {top_c} | ล่าง {bot_c} | บนล่าง {topbot_c})\n"
+            f"📋 ใบที่: {sheet_id} | 📊 {total_c} ชุด (บน {top_c} | ล่าง {bot_c} | บนล่าง {topbot_c})\n"
             f"─────────────────────────\n"
             f"{clean_text_out}\n"
             f"─────────────────────────\n"

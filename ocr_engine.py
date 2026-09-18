@@ -51,23 +51,45 @@ SYSTEM_PROMPT = """คุณคือ AI ผู้เชี่ยวชาญร
 - หากในบรรทัดเดียวกันมีตัวเลขหลายคู่ (เช่น "605=200 609=100" หรือ "12-20, 34-30" หรือ "12 20 34 30") ให้แยกออกเป็นคนละรายการใน Array ทันที ห้ามรวมกันในชุดเดียว
 
 =======================================================
-4. กฎการกรองข้อมูลที่ไม่เกี่ยวข้อง (NOISE FILTERING) — สำคัญมาก:
+4. กฎการกระจายกลุ่มตัวเลขจากปีกกา (BRACE / BRACKET GROUPING) — สำคัญมาก:
+=======================================================
+- หากพบเครื่องหมายปีกกา '{' หรือ '}' เส้นโยง เส้นปีกกาแนวดิ่ง หรือลูกศร คลุมกลุ่มตัวเลขหวย (set1) หลายตัว เพื่อชี้ไปที่ยอดเงิน (set2) ก้อนเดียวกัน
+  (เช่น ตัวเลข 401, 402, 403, 404, 405 เขียนเรียงลงมา แล้วมีปีกกา '}' คลุมทั้งหมด ชี้ไปที่ยอดเงิน 20x20 หรือ 50 ก้อนเดียว)
+- กฎเหล็ก: ให้กระจายยอดเงิน (set2) และรหัสพิเศษ (set3) นั้น ให้กับตัวเลขหวยทุกตัวในกลุ่มนั้น แยกเป็นคนละรายการใน Array ทันที
+  ตัวอย่างผลลัพธ์ที่ต้องสกัดได้:
+  {"set1": "401", "set2": "20x20", "set3": "", "raw_text": "401 = 20x20", "confidence": "high", "uncertain_note": ""}
+  {"set1": "402", "set2": "20x20", "set3": "", "raw_text": "402 = 20x20", "confidence": "high", "uncertain_note": ""}
+  {"set1": "403", "set2": "20x20", "set3": "", "raw_text": "403 = 20x20", "confidence": "high", "uncertain_note": ""}
+  {"set1": "404", "set2": "20x20", "set3": "", "raw_text": "404 = 20x20", "confidence": "high", "uncertain_note": ""}
+  {"set1": "405", "set2": "20x20", "set3": "", "raw_text": "405 = 20x20", "confidence": "high", "uncertain_note": ""}
+- ห้ามจับคู่ให้แค่ตัวเลขที่อยู่ตรงกลางตัวเดียวเด็ดขาด ตัวเลขทุกตัวที่อยู่ในปีกกาหรือเส้นโยงเดียวกัน จะต้องได้รับยอดเงินนั้นอย่างครบถ้วนทุกรายการ
+
+=======================================================
+5. การประเมินความมั่นใจและระบุจุดที่ไม่ชัดเจน (CONFIDENCE & UNCERTAIN TAGGING):
+=======================================================
+- ทุกรายการใน columns ต้องระบุ:
+  * "confidence": "high" (อ่านชัดเจนมั่นใจ) หรือ "low" (ลายมือหวัดมาก, หมึกจาง, หรือก้ำกึ่งระหว่างตัวเลขสองตัว เช่น 3 หรือ 8)
+  * "uncertain_note": หากเป็น "low" ให้อธิบายสั้นๆ เช่น "เลขท้ายอาจเป็น 4 หรือ 9", "หมึกจาง", "เลข 3 หรือ 8" (ถ้ามั่นใจให้ใส่ "")
+  * หากหลักใดอ่านไม่ออกจริงๆ ให้ใช้เครื่องหมาย '?' แทนหลักนั้นได้ เช่น "40?"
+- "unclear_notes": สรุปจุดที่พบลายมือเขียนแต่เบลอจนอ่านไม่ออก หรือรายการที่มีความไม่ชัดเจน เป็น Array ของข้อความ เช่น ["พบลายมือหมึกจางแถวล่างแต่อ่านไม่ออก", "เลข 404 ไม่ชัด"]
+
+=======================================================
+6. กฎการกรองข้อมูลที่ไม่เกี่ยวข้อง (NOISE FILTERING) — สำคัญมาก:
 =======================================================
 - ข้อความที่พิมพ์มาจากฟอร์ม (ข้อความสำเร็จรูป, หัวตาราง, โลโก้, เส้นตาราง): ห้ามนำมาใส่ใน JSON เด็ดขาด
 - รายการที่ถูกขีดฆ่า หรือมีเส้นทับผ่าน: ให้ข้ามทั้งรายการนั้น (ถือว่ายกเลิก)
-- ลายเซ็น, วงกลม, ลูกศร, เครื่องหมายอื่นๆ ที่ไม่ใช่ตัวเลข: ให้ข้าม
-- รายการที่ไม่มี set1 (ตัวเลข 2-4 หลัก) + set2 (ยอดเงิน) ครบคู่: ให้ข้ามรายการนั้น ห้ามเดา
-- ถ้าบรรทัดใดอ่านไม่ออกจริงๆ ให้ข้ามเฉพาะบรรทัดนั้น และอ่านบรรทัดอื่นต่อ
+- ลายเซ็น, วงกลม, เครื่องหมายอื่นๆ ที่ไม่ใช่ตัวเลข: ให้ข้าม
+- รายการที่ไม่มี set1 (ตัวเลข 2-4 หลัก) + set2 (ยอดเงิน) ครบคู่ (และไม่ได้อยู่ในปีกกา): ให้ข้ามรายการนั้น
+- ถ้าจุดใดอ่านไม่ออกจริงๆ ให้ระบุไว้ใน "unclear_notes"
 
 =======================================================
-5. กฎสำหรับภาพหนาแน่น หรือลายมือเขียนชิดกัน (HIGH-DENSITY SHEETS):
+7. กฎสำหรับภาพหนาแน่น หรือลายมือเขียนชิดกัน (HIGH-DENSITY SHEETS):
 =======================================================
 - หากตัวเลขเขียนติดหรือเบียดกัน ให้เพ่งดูลายเส้นปากกาแยกแต่ละหลักอย่างอิสระ
 - หากหางตัวเลขบรรทัดบนลากมาแตะหัวเลขบรรทัดล่าง ให้อ่านแยกแถวกันตามระดับบรรทัด
-- หากมีรายการที่เบลอจนอ่านไม่ออก ให้ข้ามเฉพาะจุดนั้นไป และอ่านรายการอื่นๆ ให้ครบถ้วน
 
 =======================================================
-6. โครงสร้าง JSON ที่ต้องส่งออก (ตอบเป็น JSON ล้วนเท่านั้น):
+8. โครงสร้าง JSON ที่ต้องส่งออก (ตอบเป็น JSON ล้วนเท่านั้น):
 =======================================================
 {
   "header": {
@@ -76,12 +98,27 @@ SYSTEM_PROMPT = """คุณคือ AI ผู้เชี่ยวชาญร
     "date": "",
     "total_amount": ""
   },
+  "unclear_notes": [],
   "columns": {
     "top": [
-      {"set1": "401", "set3": "", "set2": "120x120", "raw_text": "401 = 120x120"}
+      {
+        "set1": "401",
+        "set3": "",
+        "set2": "120x120",
+        "raw_text": "401 = 120x120",
+        "confidence": "high",
+        "uncertain_note": ""
+      }
     ],
     "bottom": [
-      {"set1": "12", "set3": "", "set2": "50", "raw_text": "12 = 50"}
+      {
+        "set1": "12",
+        "set3": "",
+        "set2": "50",
+        "raw_text": "12 = 50",
+        "confidence": "high",
+        "uncertain_note": ""
+      }
     ],
     "top_bottom": []
   }
@@ -229,19 +266,24 @@ def auto_repair_extracted_data(ocr_result: dict) -> dict:
             s3 = str(itm.get("set3") or "").strip()
             raw = str(itm.get("raw_text") or "").strip()
             
+            confidence = str(itm.get("confidence") or "high").strip().lower()
+            if confidence not in ("high", "low"):
+                confidence = "high"
+            uncertain_note = str(itm.get("uncertain_note") or "").strip()
+            
             # Skip completely empty entries
             if not s1 and not s2:
                 continue
                 
             # Check if s1 contains an embedded price or separator (e.g. s1="401=120", "401-120", "401:120", "401 120")
             if not s2:
-                m_split = re.match(r"^(\d{2,4})\s*[=\-:/ ]\s*(.+)$", s1)
+                m_split = re.match(r"^([\d?]{2,4})\s*[=\-:/ ]\s*(.+)$", s1)
                 if m_split:
                     s1 = m_split.group(1).strip()
                     s2 = m_split.group(2).strip()
                     
             # Check if s1 contains embedded special code (e.g. "401ก350" or "401 ก3 50")
-            m_s3_in_s1 = re.match(r"^(\d{2,4})\s*(ก[36])\s*(.*)$", s1)
+            m_s3_in_s1 = re.match(r"^([\d?]{2,4})\s*(ก[36])\s*(.*)$", s1)
             if m_s3_in_s1:
                 s1 = m_s3_in_s1.group(1).strip()
                 s3 = m_s3_in_s1.group(2).strip()
@@ -254,12 +296,19 @@ def auto_repair_extracted_data(ocr_result: dict) -> dict:
             curr_s3 = s3
             
             while True:
-                m = re.search(r"^(\d+(?:[xX]\d+)?)\s*[,;/ ]+\s*(\d{2,4})\s*[=\-:/ ]\s*(.+)$", curr_s2)
+                m = re.search(r"^([\d?]+(?:[xX][\d?]+)?)\s*[,;/ ]+\s*([\d?]{2,4})\s*[=\-:/ ]\s*(.+)$", curr_s2)
                 if m:
                     first_s2 = m.group(1).replace("X", "x").strip()
                     next_s1 = m.group(2).strip()
                     next_s2 = m.group(3).strip()
-                    new_items.append({"set1": curr_s1, "set2": first_s2, "set3": curr_s3, "raw_text": f"{curr_s1} = {first_s2}"})
+                    new_items.append({
+                        "set1": curr_s1,
+                        "set2": first_s2,
+                        "set3": curr_s3,
+                        "raw_text": f"{curr_s1} = {first_s2}",
+                        "confidence": confidence,
+                        "uncertain_note": uncertain_note
+                    })
                     curr_s1 = next_s1
                     curr_s2 = next_s2
                     curr_s3 = ""
@@ -272,23 +321,43 @@ def auto_repair_extracted_data(ocr_result: dict) -> dict:
                             curr_s3 = m_s3.group(1)
                             final_s2 = final_s2.replace(curr_s3, "").strip()
 
+                    # If '?' exists, tag as low confidence
+                    if "?" in curr_s1 or "?" in final_s2:
+                        confidence = "low"
+                        if not uncertain_note:
+                            uncertain_note = "มีตัวเลขที่ไม่ชัดเจน"
+
                     # ── Post-processing validation: drop garbage entries ──
-                    # set1 must be 2-4 Arabic digits only
-                    if not re.fullmatch(r"\d{2,4}", curr_s1):
+                    # set1 must be 2-4 digits or '?' (e.g. 40?)
+                    if not re.fullmatch(r"[\d?]{2,4}", curr_s1):
                         break
-                    # set2 must be a plain number OR NxN format
-                    if not re.fullmatch(r"\d+(?:x\d+)?", final_s2):
+                    # set2 must be a plain number OR NxN format (allows '?' if uncertain)
+                    if not re.fullmatch(r"[\d?]+(?:x[\d?]+)?", final_s2):
                         break
                     # set3 must be empty, ก3, or ก6 only
                     if curr_s3 and curr_s3 not in ("ก3", "ก6"):
                         curr_s3 = ""
 
-                    new_items.append({"set1": curr_s1, "set2": final_s2, "set3": curr_s3, "raw_text": raw or f"{curr_s1} = {final_s2}"})
+                    new_items.append({
+                        "set1": curr_s1,
+                        "set2": final_s2,
+                        "set3": curr_s3,
+                        "raw_text": raw or f"{curr_s1} = {final_s2}",
+                        "confidence": confidence,
+                        "uncertain_note": uncertain_note
+                    })
                     break
                     
         repaired_cols[col_key] = new_items
         
     ocr_result["columns"] = repaired_cols
+    
+    # Ensure unclear_notes list is preserved
+    if not isinstance(ocr_result.get("unclear_notes"), list):
+        ocr_result["unclear_notes"] = []
+    else:
+        ocr_result["unclear_notes"] = [str(n).strip() for n in ocr_result["unclear_notes"] if str(n).strip()]
+        
     return ocr_result
 
 def extract_from_image(image_bytes: bytes, mime_type: str = "image/jpeg") -> dict:
