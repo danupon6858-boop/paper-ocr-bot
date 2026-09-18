@@ -313,6 +313,16 @@ def get_latest_pending_scan(user_id: str) -> Optional[Dict]:
     conn.close()
     return dict(row) if row else None
 
+def _strip_validation_keys(columns: dict) -> dict:
+    """Strip validator-added keys (is_valid, errors) from column items before writing to ocr_json."""
+    clean = {}
+    for col_key, items in columns.items():
+        clean[col_key] = [
+            {k: v for k, v in itm.items() if k not in ("is_valid", "errors")}
+            for itm in (items if isinstance(items, list) else [])
+        ]
+    return clean
+
 def update_pending_scan_items(scan_id: int, new_columns: dict) -> bool:
     init_db()
     conn = get_db_connection()
@@ -324,7 +334,8 @@ def update_pending_scan_items(scan_id: int, new_columns: dict) -> bool:
         return False
         
     ocr_data = json.loads(row["ocr_json"])
-    ocr_data["columns"] = new_columns
+    # Strip validator keys (is_valid, errors) before storing — keeps ocr_json clean
+    ocr_data["columns"] = _strip_validation_keys(new_columns)
     
     from validator import OCRValidator
     val_data = OCRValidator.validate_document(ocr_data)

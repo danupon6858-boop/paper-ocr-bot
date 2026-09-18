@@ -286,8 +286,20 @@ def handle_delete_command(text: str, user_id: str, reply_token: str) -> bool:
         reply_line_message(reply_token, "⚠️ ไม่พบรายการที่รอยืนยันอยู่ในขณะนี้ครับ")
         return True
         
-    val_data = json.loads(scan["val_json"])
-    cols = val_data.get("validated_columns", {})
+    # Read from ocr_json (clean format, no is_valid/errors keys)
+    ocr_data = json.loads(scan["ocr_json"])
+    cols = ocr_data.get("columns", {})
+    
+    # Check if set1 appears in multiple columns
+    found_in = [c for c in ["top", "bottom", "top_bottom"]
+                if any(itm.get("set1") == target_num for itm in cols.get(c, []))]
+    if len(found_in) > 1:
+        col_names = {"top": "บน", "bottom": "ล่าง", "top_bottom": "บนล่าง"}
+        cols_str = " และ ".join(col_names[c] for c in found_in)
+        reply_line_message(reply_token,
+            f"⚠️ เลข {target_num} ปรากฏในหลายคอลัมน์ ({cols_str})\n"
+            f"💡 กรุณาคัดลอกข้อความทั้งใบ แก้ไข แล้วส่งกลับมาแทนครับ")
+        return True
     
     found = False
     new_cols = {"top": [], "bottom": [], "top_bottom": []}
@@ -310,6 +322,7 @@ def handle_delete_command(text: str, user_id: str, reply_token: str) -> bool:
     reply_line_message(reply_token, f"{msg_ack}\n\n{clean_text}", quick_replies)
     return True
 
+
 def handle_edit_command(text: str, user_id: str, reply_token: str) -> bool:
     m = re.match(r"^แก้\s+(\d+(?:[=\s][^\s]+)?)\s+เป็น\s+(.+)$", text.strip())
     if not m:
@@ -322,13 +335,25 @@ def handle_edit_command(text: str, user_id: str, reply_token: str) -> bool:
         reply_line_message(reply_token, "⚠️ ไม่พบรายการที่รอยืนยันอยู่ในขณะนี้ครับ")
         return True
         
-    val_data = json.loads(scan["val_json"])
-    cols = val_data.get("validated_columns", {})
+    # Read from ocr_json (clean format, no is_valid/errors keys)
+    ocr_data = json.loads(scan["ocr_json"])
+    cols = ocr_data.get("columns", {})
     
     old_s1 = old_target.split("=")[0].strip() if "=" in old_target else old_target.split()[0].strip()
     parsed_new = parse_entry_line(new_target)
     if not parsed_new:
         reply_line_message(reply_token, f"❌ รูปแบบเลขใหม่ '{new_target}' ไม่ถูกต้อง (เช่น 375 หรือ 375=36x36)")
+        return True
+    
+    # Check if set1 appears in multiple columns
+    found_in = [c for c in ["top", "bottom", "top_bottom"]
+                if any(itm.get("set1") == old_s1 for itm in cols.get(c, []))]
+    if len(found_in) > 1:
+        col_names = {"top": "บน", "bottom": "ล่าง", "top_bottom": "บนล่าง"}
+        cols_str = " และ ".join(col_names[c] for c in found_in)
+        reply_line_message(reply_token,
+            f"⚠️ เลข {old_s1} ปรากฏในหลายคอลัมน์ ({cols_str})\n"
+            f"💡 กรุณาคัดลอกข้อความทั้งใบ แก้ไข แล้วส่งกลับมาแทนครับ")
         return True
         
     found = False
@@ -363,6 +388,7 @@ def handle_edit_command(text: str, user_id: str, reply_token: str) -> bool:
     quick_replies = [("✅ ยืนยัน", f"ยืนยัน {scan['id']}"), ("❌ ยกเลิก", f"ยกเลิก {scan['id']}")]
     reply_line_message(reply_token, f"{msg_ack}\n\n{clean_text}", quick_replies)
     return True
+
 
 def handle_image_message(message_id: str, reply_token: str, user_id: str, user_info: dict):
     # 1. Check Period Status
@@ -666,8 +692,8 @@ def handle_text_message(text: str, reply_token: str, user_id: str, is_owner: boo
             "📋 เมนูการใช้งานระบบ\n"
             "─────────────────────────\n"
             "1️⃣ ถ่ายรูปกระดาษส่งเข้ามา ➔ ระบบอ่านและส่งสรุปให้ตรวจ\n"
-            "2️⃣ ก๊อปปี้ข้อความตัวเลขไปแก้ไข/ลบ แล้วส่งกลับมา ➔ ระบบบันทึกทันที\n"
-            "3️⃣ หรือพิมพ์ 'ลบ [เลข]' / 'แก้ [เลขเดิม] เป็น [เลขใหม่]'\n"
+            "2️⃣ แก้ทีละรายการ: พิมพ์ 'แก้ 1234 เป็น 2345' หรือ 'ลบ 1234'\n"
+            "3️⃣ แก้หลายรายการ/ย้ายคอลัมน์: คัดลอกข้อความทั้งใบ แก้ไข แล้วส่งกลับ\n"
             "4️⃣ พิมพ์ 'เช็ค [เลข]' ➔ ค้นหาเลขชุดที่ 1 ในงวดนี้\n"
             "5️⃣ พิมพ์ 'รีเช็ค' ➔ ตรวจสอบลำดับแผ่นและแผ่นที่ตกหล่น\n"
             "6️⃣ พิมพ์ 'สถานะ' ➔ ดูยอดรวมและสถานะงวด\n"
@@ -677,61 +703,58 @@ def handle_text_message(text: str, reply_token: str, user_id: str, is_owner: boo
                 "─────────────────────────\n"
                 "👑 คำสั่งเจ้าของระบบ:\n"
                 "• 'ปิดงวด' / 'เปิดงวด' / 'เปิดงวดใหม่' เพื่อเปิด-ปิดงวด\n"
-                "• 'อนุมัติ [ชื่อ] [รหัส A/B/C]' เพื่อเปิดสิทธิ์ให้พนักงาน\n"
                 "• 'บล็อก [ชื่อ]' เพื่อตัดสิทธิ์\n"
             )
         help_msg += f"─────────────────────────\n🌐 ตารางสรุปสดและเปิดปิดงวด:\n{BASE_URL}"
         reply_line_message(reply_token, help_msg)
         return
 
+
     # 9. Check if Worker Pasted an Edited Sheet Text Block
     parsed_sheet = parse_sheet_text(clean_text)
     if parsed_sheet and any(len(items) > 0 for items in parsed_sheet["columns"].values()):
-        # Validate edited entries
-        val_result = OCRValidator.validate_document({"columns": parsed_sheet["columns"]})
-        if not val_result["is_all_valid"]:
-            err_lines = ["⚠️ ตัวเลขที่แก้ไขมีจุดที่ไม่ตรงตามกฎ:"]
-            for err in val_result["errors"][:5]:
-                err_lines.append(f"• {err}")
-            err_lines.append("\n💡 กรุณาแก้ไขตัวเลขให้ถูกต้องแล้วส่งใหม่อีกครั้งครับ")
-            reply_line_message(reply_token, "\n".join(err_lines))
-            return
-            
-        # Valid edited data!
         active_p = database.get_active_period()
         if not active_p:
             reply_line_message(reply_token, f"⛔️ ขณะนี้ระบบปิดรับข้อมูล (ยังไม่เปิดงวดใหม่)\n🌐 {BASE_URL}")
             return
-            
+
         worker_code = user_info.get("worker_code", "A")
         emp_name = user_info.get("display_name", "พนักงาน")
-        
-        # Check if there is an existing pending scan
+
+        # Update existing pending scan, or create a new one — but do NOT confirm yet
         pending_scan = database.get_latest_pending_scan(user_id)
         if pending_scan:
+            scan_id = pending_scan["id"]
             sheet_id = pending_scan["sheet_id"]
-            database.update_pending_scan_items(pending_scan["id"], parsed_sheet["columns"])
-            database.confirm_pending_scan(pending_scan["id"])
+            database.update_pending_scan_items(scan_id, parsed_sheet["columns"])
         else:
             raw_s = parsed_sheet.get("sheet_id") or "1"
             sheet_id = f"{worker_code}-{raw_s}" if not raw_s.startswith(f"{worker_code}-") else raw_s
-            ocr_obj = {"header": {"sheet_id": sheet_id, "customer_name": emp_name}, "columns": parsed_sheet["columns"]}
-            new_id = database.create_pending_scan(user_id, worker_code, emp_name, active_p["id"], sheet_id, ocr_obj, val_result)
-            database.confirm_pending_scan(new_id)
-            
-        top_c = len(parsed_sheet["columns"].get("top", []))
-        bot_c = len(parsed_sheet["columns"].get("bottom", []))
-        topbot_c = len(parsed_sheet["columns"].get("top_bottom", []))
+            val_result = OCRValidator.validate_document({"columns": parsed_sheet["columns"]})
+            ocr_obj = {"header": {"sheet_id": sheet_id, "customer_name": emp_name, "date": "", "total_amount": ""}, "columns": parsed_sheet["columns"]}
+            scan_id = database.create_pending_scan(user_id, worker_code, emp_name, active_p["id"], sheet_id, ocr_obj, val_result)
+
+        cols = parsed_sheet["columns"]
+        top_c = len(cols.get("top", []))
+        bot_c = len(cols.get("bottom", []))
+        topbot_c = len(cols.get("top_bottom", []))
         total_c = top_c + bot_c + topbot_c
-        
-        reply_msg = (
-            f"✅ บันทึกข้อมูลที่แก้ไขเรียบร้อยแล้วครับ!\n"
-            f"📋 ใบที่: {sheet_id}\n"
-            f"📌 ข้อมูลถูกบันทึกลงใน: {active_p['name']}\n"
-            f"📊 บันทึกทั้งหมด: {total_c} รายการ (บน {top_c} | ล่าง {bot_c} | บนล่าง {topbot_c})\n\n"
-            f"🌐 ดูตารางสด: {BASE_URL}"
+
+        clean_text_out = format_clean_editable_text(sheet_id, cols)
+        preview_msg = (
+            f"✏️ ตรวจสอบข้อมูลที่แก้ไขแล้ว:\n"
+            f"📋 ใบที่: {sheet_id} | 📊 {total_c} รายการ (บน {top_c} | ล่าง {bot_c} | บนล่าง {topbot_c})\n"
+            f"─────────────────────────\n"
+            f"{clean_text_out}\n"
+            f"─────────────────────────\n"
+            f"✅ หากถูกต้อง กดปุ่ม [ ยืนยัน ] เพื่อบันทึกลงระบบครับ"
         )
-        reply_line_message(reply_token, reply_msg)
+        quick_replies = [
+            ("✅ ยืนยัน", f"ยืนยัน {scan_id}"),
+            ("❌ ยกเลิก", f"ยกเลิก {scan_id}")
+        ]
+        reply_line_message(reply_token, preview_msg, quick_replies)
+
         return
         
     reply_line_message(
