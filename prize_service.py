@@ -338,6 +338,44 @@ def render_prizes_page(period_id: Optional[int] = None, custom_prizes: Optional[
     """
 
     results = check_period_winners(p_id, top3, bottom2)
+    financials = database.get_period_financials(p_id)
+    total_inflow = financials.get("total_inflow", 0.0)
+    total_payout = results.get("total_payout", 0.0)
+    net_balance = total_inflow - total_payout
+    margin_pct = (net_balance / total_inflow * 100) if total_inflow > 0 else 0.0
+    is_profit = net_balance >= 0
+
+    balance_color = "#16a34a" if is_profit else "#dc2626"
+    balance_sign = "+" if net_balance > 0 else ""
+    balance_tag = f"🟢 กำไร {margin_pct:.1f}%" if is_profit else f"🔴 ขาดทุน {abs(margin_pct):.1f}%"
+    if total_inflow == 0 and total_payout == 0:
+        balance_tag = "⚪️ ยอดเสมอตัว (0%)"
+
+    financial_card_html = f"""
+    <div style="background:white; border-radius:14px; border:1px solid #e2e8f0; padding:18px 20px; margin-bottom:20px; box-shadow:0 1px 3px rgba(0,0,0,0.05);">
+        <div style="font-size:16px; font-weight:800; color:#0f172a; margin-bottom:14px; display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
+            <span>💰 สรุปบัญชีกำไร-ขาดทุนประจำงวด (P&amp;L Financial Summary)</span>
+            <span style="font-size:13px; font-weight:700; color:#475569; background:#f1f5f9; padding:4px 10px; border-radius:8px;">{p_name}</span>
+        </div>
+        <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(210px, 1fr)); gap:14px;">
+            <div style="background:#f8fafc; border:1px solid #e2e8f0; border-radius:12px; padding:16px; text-align:center;">
+                <div style="font-size:12px; font-weight:700; color:#64748b; text-transform:uppercase;">📥 ยอดรับรวมทั้งหมด (Inflow)</div>
+                <div style="font-size:26px; font-weight:800; color:#2563eb; margin-top:4px;">{total_inflow:,.0f} <span style="font-size:14px; font-weight:600;">บาท</span></div>
+                <div style="font-size:11px; color:#94a3b8; margin-top:4px;">บน {financials['inflow_by_category'].get('บน', 0):,.0f} | ล่าง {financials['inflow_by_category'].get('ล่าง', 0):,.0f} | บนล่าง {financials['inflow_by_category'].get('บนล่าง', 0):,.0f}</div>
+            </div>
+            <div style="background:#f8fafc; border:1px solid #e2e8f0; border-radius:12px; padding:16px; text-align:center;">
+                <div style="font-size:12px; font-weight:700; color:#64748b; text-transform:uppercase;">📤 ยอดจ่ายรางวัลรวม (Payout)</div>
+                <div style="font-size:26px; font-weight:800; color:#dc2626; margin-top:4px;">{total_payout:,.0f} <span style="font-size:14px; font-weight:600;">บาท</span></div>
+                <div style="font-size:11px; color:#94a3b8; margin-top:4px;">ผู้ถูกรางวัล {results['total_winners']} รายการ</div>
+            </div>
+            <div style="background:#f8fafc; border:2px solid {balance_color}; border-radius:12px; padding:16px; text-align:center;">
+                <div style="font-size:12px; font-weight:700; color:#64748b; text-transform:uppercase;">💵 กำไรสุทธิ (Net Margin)</div>
+                <div style="font-size:26px; font-weight:800; color:{balance_color}; margin-top:4px;">{balance_sign}{net_balance:,.0f} <span style="font-size:14px; font-weight:600;">บาท</span></div>
+                <div style="font-size:12px; font-weight:700; color:{balance_color}; margin-top:4px;">{balance_tag}</div>
+            </div>
+        </div>
+    </div>
+    """
     
     winners_rows = ""
     for idx, w in enumerate(results["winners"], 1):
@@ -420,6 +458,8 @@ def render_prizes_page(period_id: Optional[int] = None, custom_prizes: Optional[
         </div>
 
         {status_banner_html}
+
+        {financial_card_html}
 
         <div class="controls-card">
             <form method="GET" action="/prizes">

@@ -1018,6 +1018,8 @@ def render_html_dashboard(period_id: Optional[int] = None, scope: str = "period"
     p_is_open = (selected_p and selected_p.get("status") == "OPEN")
 
     summary = database.get_daily_summary(p_id)
+    financials = database.get_period_financials(p_id)
+    total_inflow = financials.get("total_inflow", 0.0)
     conn = database.get_db_connection()
     cursor = conn.cursor()
     cursor.execute("""
@@ -1132,6 +1134,47 @@ def render_html_dashboard(period_id: Optional[int] = None, scope: str = "period"
 
     # Data for Tab 3 (AI Feedback & Accuracy)
     ai_metrics = database.get_ai_feedback_metrics(target_pid)
+    import ai_training_pipeline
+    ai_readiness = ai_training_pipeline.get_dataset_readiness(target_pid)
+    
+    ai_training_card_html = f"""
+    <div style="background:white; border-radius:14px; border:1px solid #e2e8f0; padding:18px 20px; margin-bottom:20px; box-shadow:0 1px 3px rgba(0,0,0,0.05);">
+        <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px; margin-bottom:12px;">
+            <div>
+                <div style="font-size:17px; font-weight:800; color:#0f172a; display:flex; align-items:center; gap:8px;">
+                    <span>🧠 ระบบเตรียมชุดข้อมูลฝึกฝนโมเดล AI (VLM Fine-Tuning Pipeline)</span>
+                </div>
+                <div style="font-size:13px; color:#64748b; margin-top:2px;">รวบรวมภาพถ่ายโพยจริงพร้อมผลเฉลยที่ตรวจสอบแล้ว นำไป Fine-Tune โมเดลตัวเบา <strong>Qwen2-VL-2B</strong> บน Google Colab ฟรี</div>
+            </div>
+            <span style="font-size:13px; font-weight:700; padding:6px 12px; border-radius:8px; background:#f1f5f9; color:#334155;">{ai_readiness['status_badge']}</span>
+        </div>
+        
+        <div style="background:#f8fafc; border:1px solid #e2e8f0; border-radius:10px; padding:14px; margin-bottom:14px;">
+            <div style="display:flex; justify-content:space-between; font-size:13px; font-weight:700; color:#475569; margin-bottom:6px;">
+                <span>ความพร้อมของชุดข้อมูล ({ai_readiness['period_name']})</span>
+                <span style="color:#2563eb;">{ai_readiness['total_sheets']} / {ai_readiness['min_recommended']} ใบ ({ai_readiness['readiness_pct']}%)</span>
+            </div>
+            <div style="background:#e2e8f0; border-radius:999px; height:10px; overflow:hidden;">
+                <div style="background:linear-gradient(90deg, #3b82f6, #10b981); height:100%; width:{ai_readiness['readiness_pct']}%; transition:width 0.5s;"></div>
+            </div>
+            <div style="font-size:12px; color:#64748b; margin-top:8px;">
+                ℹ️ {ai_readiness['status_desc']} (มีข้อมูลตัวเลขเฉลยแล้ว {ai_readiness['total_entries']} รายการ)
+            </div>
+        </div>
+
+        <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
+            <a href="/export-ai-bundle?period_id={p_id}" style="background:#2563eb; color:white; padding:10px 18px; border-radius:10px; font-weight:700; text-decoration:none; font-size:13px; display:inline-flex; align-items:center; gap:6px; box-shadow:0 2px 4px rgba(37,99,235,0.2);" download>
+                📦 ดาวน์โหลดชุดข้อมูลพร้อมเทรน (.ZIP)
+            </a>
+            <a href="/colab-notebook" style="background:#475569; color:white; padding:10px 18px; border-radius:10px; font-weight:700; text-decoration:none; font-size:13px; display:inline-flex; align-items:center; gap:6px;" download>
+                📓 ดาวน์โหลด Colab Notebook (.ipynb)
+            </a>
+            <a href="https://colab.research.google.com" target="_blank" style="background:#f59e0b; color:white; padding:10px 18px; border-radius:10px; font-weight:700; text-decoration:none; font-size:13px; display:inline-flex; align-items:center; gap:6px;">
+                🚀 เปิด Google Colab
+            </a>
+        </div>
+    </div>
+    """
     
     misread_html = ""
     for pair, count in ai_metrics["top_misread"]:
@@ -1354,6 +1397,7 @@ def render_html_dashboard(period_id: Optional[int] = None, scope: str = "period"
         <div style="display:flex; gap:8px; flex-wrap:wrap;">
             <a href="/prizes?period_id={p_id}" style="background:#dc2626; color:white; border:none; padding:10px 16px; border-radius:10px; font-weight:700; text-decoration:none; font-size:13px; display:inline-flex; align-items:center; gap:6px; box-shadow:0 2px 4px rgba(220,38,38,0.2);">🎰 ตรวจผลรางวัล</a>
             <a href="/backup-gdrive" style="background:#0284c7; color:white; border:none; padding:10px 16px; border-radius:10px; font-weight:700; text-decoration:none; font-size:13px; display:inline-flex; align-items:center; gap:6px;">☁️ สำรอง Google Drive</a>
+            <a href="/export-ai-bundle?period_id={p_id}" style="background:#7c3aed; color:white; border:none; padding:10px 16px; border-radius:10px; font-weight:700; text-decoration:none; font-size:13px; display:inline-flex; align-items:center; gap:6px; box-shadow:0 2px 4px rgba(124,58,237,0.2);" download>📦 ชุดเทรน AI (.ZIP)</a>
             <a href="/export?period_id={p_id}" class="btn-export" download>📥 ดาวน์โหลด Excel (.CSV)</a>
             <a href="/export-ai-dataset?period_id={p_id}" class="btn-dataset" download>💾 ดาวน์โหลด AI Dataset (.JSON)</a>
         </div>
@@ -1390,6 +1434,10 @@ def render_html_dashboard(period_id: Optional[int] = None, scope: str = "period"
             <div class="stat-card">
                 <div class="stat-label">รายการทั้งหมด</div>
                 <div class="stat-num" style="color:#059669">{summary['total_entries']} รายการ</div>
+            </div>
+            <div class="stat-card" style="border-left: 4px solid #10b981; background: #f0fdf4;">
+                <div class="stat-label" style="color:#15803d; font-weight:700;">💰 ยอดรับรวมงวดนี้</div>
+                <div class="stat-num" style="color:#16a34a">{total_inflow:,.0f} <span style="font-size:13px; font-weight:600;">บาท</span></div>
             </div>
             <div class="stat-card">
                 <div class="stat-label">หมวด "บน"</div>
@@ -1510,6 +1558,8 @@ def render_html_dashboard(period_id: Optional[int] = None, scope: str = "period"
                 <a href="/?period_id={p_id}&scope=all&tab=ai" class="scope-pill {'active' if is_all_time else ''}">🌐 ตลอดกาล (All-Time)</a>
             </div>
         </div>
+
+        {ai_training_card_html}
 
         <div class="stats-grid" style="grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));">
             <div class="stat-card" style="border-left: 4px solid #16a34a;">
@@ -1813,6 +1863,35 @@ class LineWebhookHandler(http.server.BaseHTTPRequestHandler):
             self.send_header("Content-Disposition", 'attachment; filename="ai_training_dataset.json"')
             self.end_headers()
             self.wfile.write(payload)
+            return
+
+        if path == "/export-ai-bundle":
+            p_id = int(qs.get("period_id", [0])[0]) or None
+            import ai_training_pipeline
+            zip_bytes = ai_training_pipeline.build_training_bundle(p_id)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/zip")
+            self.send_header("Content-Disposition", 'attachment; filename="paper_ocr_training_bundle.zip"')
+            self.send_header("Content-Length", str(len(zip_bytes)))
+            self.end_headers()
+            self.wfile.write(zip_bytes)
+            return
+
+        if path == "/colab-notebook":
+            nb_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Paper_OCR_FineTune_Colab.ipynb")
+            if os.path.exists(nb_path):
+                with open(nb_path, "rb") as f:
+                    nb_bytes = f.read()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/x-ipynb+json; charset=utf-8")
+                self.send_header("Content-Disposition", 'attachment; filename="Paper_OCR_FineTune_Colab.ipynb"')
+                self.send_header("Content-Length", str(len(nb_bytes)))
+                self.end_headers()
+                self.wfile.write(nb_bytes)
+            else:
+                self.send_response(404)
+                self.end_headers()
+                self.wfile.write(b"Notebook not found")
             return
 
 

@@ -733,6 +733,65 @@ def get_daily_summary(period_id: Optional[int] = None) -> Dict:
         "valid_entries": stats["valid_entries"] if stats else 0
     }
 
+def get_period_financials(period_id: Optional[int] = None) -> Dict:
+    """
+    Computes financial inflow statistics for a period:
+    total inflow (sum of bet amounts in set2), category breakdown, and average per sheet.
+    """
+    init_db()
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    if not period_id:
+        p = get_active_period() or get_latest_period()
+        period_id = p["id"] if p else 1
+        
+    cursor.execute("SELECT id, sheet_id, employee_name, total_amount FROM sheets WHERE period_id = ?", (period_id,))
+    sheets = cursor.fetchall()
+    total_sheets = len(sheets)
+    
+    cursor.execute("""
+    SELECT category, set1, set2, is_valid
+    FROM entries
+    WHERE period_id = ? AND is_valid = 1
+    """, (period_id,))
+    entries = cursor.fetchall()
+    conn.close()
+    
+    total_entries = len(entries)
+    total_inflow = 0.0
+    inflow_by_category = {"บน": 0.0, "ล่าง": 0.0, "บนล่าง": 0.0}
+    
+    for e in entries:
+        cat = e["category"] or ""
+        s2 = str(e["set2"] or "").strip().lower()
+        vol = 0.0
+        try:
+            if "x" in s2:
+                parts = s2.split("x")
+                vol = sum(float(re.sub(r'[^\d.]', '', p)) for p in parts if re.sub(r'[^\d.]', '', p))
+            else:
+                vol = float(re.sub(r'[^\d.]', '', s2)) if re.sub(r'[^\d.]', '', s2) else 0.0
+        except Exception:
+            vol = 0.0
+            
+        total_inflow += vol
+        if cat in inflow_by_category:
+            inflow_by_category[cat] += vol
+        else:
+            inflow_by_category[cat] = inflow_by_category.get(cat, 0.0) + vol
+            
+    avg_per_sheet = (total_inflow / total_sheets) if total_sheets > 0 else 0.0
+    
+    return {
+        "period_id": period_id,
+        "total_sheets": total_sheets,
+        "total_entries": total_entries,
+        "total_inflow": total_inflow,
+        "inflow_by_category": inflow_by_category,
+        "avg_per_sheet": avg_per_sheet
+    }
+
 def export_csv(period_id: Optional[int] = None, output_path: Optional[str] = None) -> str:
     init_db()
     conn = get_db_connection()
