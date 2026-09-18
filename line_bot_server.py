@@ -1296,40 +1296,10 @@ class LineWebhookHandler(http.server.BaseHTTPRequestHandler):
                 
                 if not is_owner:
                     if user is None:
+                        # New user — register and approve automatically
                         display_name = get_line_profile(user_id)
                         database.register_pending_user(user_id, display_name)
-                        # Re-fetch user to check if auto-approved (e.g. in PRE_APPROVED_USERS)
                         user = database.get_user(user_id)
-                        if user and user.get("status") == "APPROVED":
-                            # Pre-approved user — let them through, no owner notification needed
-                            pass
-                        else:
-                            next_code = database.get_next_worker_code()
-                            admin_msg = (
-                                f"🔔 [มีผู้ขอเข้าใช้งานระบบใหม่!]\n"
-                                f"👤 ชื่อ LINE: {display_name}\n"
-                                f"🆔 ID: {user_id}\n\n"
-                                f"💡 แตะปุ่มด้านล่างเพื่ออนุมัติได้ทันทีครับ:"
-                            )
-                            quick_replies = [
-                                (f"✅ อนุมัติ ({next_code})", f"อนุมัติ id:{user_id} {next_code}"),
-                                ("✅ อนุมัติ (A)", f"อนุมัติ id:{user_id} A"),
-                                ("✅ อนุมัติ (B)", f"อนุมัติ id:{user_id} B"),
-                                ("✅ อนุมัติ (C)", f"อนุมัติ id:{user_id} C"),
-                                ("⛔️ บล็อก", f"บล็อก id:{user_id}")
-                            ]
-                            seen = set()
-                            uniq_replies = []
-                            for lbl, val in quick_replies:
-                                if lbl not in seen:
-                                    seen.add(lbl)
-                                    uniq_replies.append((lbl, val))
-                            deliver_message(OWNER_USER_ID, None, admin_msg, uniq_replies)
-                            reply_line_message(reply_token, "🔒 ขออภัยครับ บัญชีนี้เป็นระบบเฉพาะภายใน\nระบบได้ส่งคำขอไปยังเจ้าของระบบแล้ว กรุณารอการอนุมัติสักครู่ครับ")
-                            continue
-                    elif user.get("status") == "PENDING":
-                        reply_line_message(reply_token, "🔒 บัญชีของคุณอยู่ระหว่างรอเจ้าของระบบอนุมัติครับ กรุณารอสักครู่ครับ")
-                        continue
                     elif user.get("status") == "BLOCKED":
                         continue
 

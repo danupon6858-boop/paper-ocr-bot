@@ -489,23 +489,16 @@ def get_user(user_id: str) -> Optional[Dict]:
     return dict(row) if row else None
 
 def register_pending_user(user_id: str, display_name: str) -> bool:
+    """Register a new user as APPROVED immediately — no approval queue needed."""
     init_db()
     conn = get_db_connection()
     cursor = conn.cursor()
     try:
-        # If this user is in the pre-approved list, register as APPROVED directly
-        if user_id in PRE_APPROVED_USERS:
-            idx = PRE_APPROVED_USERS.index(user_id)
-            letter = chr(ord('A') + idx) if idx < 26 else 'Z'
-            cursor.execute("""
-            INSERT INTO users (user_id, display_name, role, worker_code, status)
-            VALUES (?, ?, 'worker', ?, 'APPROVED')
-            """, (user_id, display_name, letter))
-        else:
-            cursor.execute("""
-            INSERT INTO users (user_id, display_name, role, worker_code, status)
-            VALUES (?, ?, 'worker', '-', 'PENDING')
-            """, (user_id, display_name))
+        next_code = get_next_worker_code()
+        cursor.execute("""
+        INSERT INTO users (user_id, display_name, role, worker_code, status)
+        VALUES (?, ?, 'worker', ?, 'APPROVED')
+        """, (user_id, display_name, next_code))
         conn.commit()
         is_new = True
     except sqlite3.IntegrityError:
