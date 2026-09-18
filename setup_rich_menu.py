@@ -34,14 +34,13 @@ def create_rich_menu_structure(base_url: str) -> dict:
     return {
         "size": {"width": 2500, "height": 843},
         "selected": True,
-        "name": "OCR Bot Rich Menu (3 Tabs)",
-        "chatBarText": "📌 เมนูหลัก (ตารางสด / ตรวจรางวัล)",
+        "name": "OCR Menu",
+        "chatBarText": "เมนูหลัก",
         "areas": [
             {
                 "bounds": {"x": 0, "y": 0, "width": 833, "height": 843},
                 "action": {
                     "type": "uri",
-                    "label": "ดูตารางสด",
                     "uri": dashboard_url
                 }
             },
@@ -49,7 +48,6 @@ def create_rich_menu_structure(base_url: str) -> dict:
                 "bounds": {"x": 833, "y": 0, "width": 834, "height": 843},
                 "action": {
                     "type": "uri",
-                    "label": "ตรวจรางวัล",
                     "uri": prizes_url
                 }
             },
@@ -57,7 +55,6 @@ def create_rich_menu_structure(base_url: str) -> dict:
                 "bounds": {"x": 1667, "y": 0, "width": 833, "height": 843},
                 "action": {
                     "type": "message",
-                    "label": "วิธีใช้งาน",
                     "text": "วิธีใช้งาน"
                 }
             }
@@ -66,6 +63,9 @@ def create_rich_menu_structure(base_url: str) -> dict:
 
 def delete_all_rich_menus():
     """ลบ Rich Menu เก่าทั้งหมดเพื่อไม่ให้ตกค้าง"""
+    token = config.LINE_CHANNEL_ACCESS_TOKEN
+    if not token:
+        return
     url = f"{LINE_API_ENDPOINT}/richmenu/list"
     req = urllib.request.Request(url, headers=get_headers())
     try:
@@ -85,12 +85,13 @@ def delete_all_rich_menus():
     except Exception as e:
         print(f"⚠️ เกิดข้อผิดพลาดในการดึงรายการ Rich Menu: {e}")
 
-def setup_rich_menu():
+def setup_rich_menu() -> tuple:
     print("🚀 เริ่มต้นการติดตั้ง LINE Rich Menu...")
     token = config.LINE_CHANNEL_ACCESS_TOKEN
     if not token:
-        print("❌ ERROR: กรุณาระบุ LINE_CHANNEL_ACCESS_TOKEN ใน config.py หรือ Render Environment Variables")
-        return False
+        err = "ไม่พบ LINE_CHANNEL_ACCESS_TOKEN ใน environment หรือ config.py"
+        print(f"❌ ERROR: {err}")
+        return False, err
         
     base_url = os.environ.get("BASE_URL", config.BASE_URL)
     print(f"🔗 Dashboard Base URL: {base_url}")
@@ -112,8 +113,13 @@ def setup_rich_menu():
             print(f"✅ สร้าง Rich Menu สำเร็จ ID: {rich_menu_id}")
     except urllib.error.HTTPError as e:
         err_msg = e.read().decode('utf-8')
-        print(f"❌ เกิดข้อผิดพลาดในการสร้าง Rich Menu ({e.code}): {err_msg}")
-        return False
+        err = f"เกิดข้อผิดพลาดในการสร้าง Rich Menu (HTTP {e.code}): {err_msg}"
+        print(f"❌ {err}")
+        return False, err
+    except Exception as e:
+        err = f"ข้อผิดพลาด: {str(e)}"
+        print(f"❌ {err}")
+        return False, err
 
     # 3. Upload Rich Menu Image
     image_path = os.path.join(os.path.dirname(__file__), "rich_menu.jpg")
@@ -123,8 +129,9 @@ def setup_rich_menu():
         content_type = "image/png"
         
     if not os.path.exists(image_path):
-        print(f"❌ ไม่พบไฟล์ภาพ Rich Menu ที่: {image_path}")
-        return False
+        err = f"ไม่พบไฟล์ภาพ Rich Menu ที่: {image_path}"
+        print(f"❌ {err}")
+        return False, err
         
     print(f"🖼️ กำลังอัปโหลดภาพ Rich Menu ({image_path})...")
     with open(image_path, "rb") as f:
@@ -142,20 +149,24 @@ def setup_rich_menu():
             print("✅ อัปโหลดภาพ Rich Menu สำเร็จ")
     except urllib.error.HTTPError as e:
         err_msg = e.read().decode('utf-8')
-        print(f"❌ ไม่สามารถอัปโหลดภาพ Rich Menu ได้ ({e.code}): {err_msg}")
-        return False
+        err = f"ไม่สามารถอัปโหลดภาพ Rich Menu ได้ (HTTP {e.code}): {err_msg}"
+        print(f"❌ {err}")
+        return False, err
 
     # 4. Set as Default Rich Menu for all users
     set_default_url = f"{LINE_API_ENDPOINT}/user/all/richmenu/{rich_menu_id}"
     set_req = urllib.request.Request(set_default_url, headers=get_headers(), method="POST")
     try:
         with urllib.request.urlopen(set_req) as resp:
-            print(f"🎉 ตั้งค่า Rich Menu ID: {rich_menu_id} เป็นค่าเริ่มต้นสำหรับผู้ใช้ทุกคนเรียบร้อย!")
-            return True
+            msg = f"ติดตั้งและตั้งค่า Rich Menu ID: {rich_menu_id} เป็นค่าเริ่มต้นสำหรับผู้ใช้ทุกคนเรียบร้อยแล้ว!"
+            print(f"🎉 {msg}")
+            return True, msg
     except urllib.error.HTTPError as e:
         err_msg = e.read().decode('utf-8')
-        print(f"❌ ไม่สามารถตั้งเป็น default ได้ ({e.code}): {err_msg}")
-        return False
+        err = f"ไม่สามารถตั้งเป็น default ได้ (HTTP {e.code}): {err_msg}"
+        print(f"❌ {err}")
+        return False, err
 
 if __name__ == "__main__":
     setup_rich_menu()
+

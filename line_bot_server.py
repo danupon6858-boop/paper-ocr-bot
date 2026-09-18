@@ -1847,15 +1847,30 @@ class LineWebhookHandler(http.server.BaseHTTPRequestHandler):
 
         if path == "/setup-rich-menu":
             import setup_rich_menu
-            success = setup_rich_menu.setup_rich_menu()
-            status_msg = "✅ ติดตั้ง LINE Rich Menu (3 ปุ่ม) สำเร็จเรียบร้อยแล้ว!" if success else "❌ การติดตั้งไม่สำเร็จ กรุณาตรวจเช็ค LOG ใน Render หรือ LINE_CHANNEL_ACCESS_TOKEN"
+            res = setup_rich_menu.setup_rich_menu()
+            if isinstance(res, tuple):
+                success, msg_detail = res
+            else:
+                success, msg_detail = res, ""
+                
+            if success:
+                status_header = "✅ ติดตั้ง LINE Rich Menu (3 ปุ่ม) สำเร็จเรียบร้อยแล้ว!"
+                box_color = "#16a34a"
+            else:
+                status_header = "❌ การติดตั้งไม่สำเร็จ"
+                box_color = "#dc2626"
+                
             res_html = f"""<!DOCTYPE html>
 <html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1.0'><title>Setup Rich Menu</title>
 <style>body{{font-family:sans-serif;background:#f8fafc;padding:40px;text-align:center;}}
-.box{{background:white;padding:30px;border-radius:16px;max-width:500px;margin:auto;box-shadow:0 4px 6px rgba(0,0,0,0.05);}}
+.box{{background:white;padding:30px;border-radius:16px;max-width:550px;margin:auto;box-shadow:0 4px 6px rgba(0,0,0,0.05);}}
 a{{display:inline-block;margin-top:20px;padding:10px 20px;background:#2563eb;color:white;text-decoration:none;border-radius:8px;font-weight:700;}}
 </style></head>
-<body><div class='box'><h2>{status_msg}</h2><a href='/'>กลับสู่หน้าหลัก Dashboard</a></div></body></html>""".encode("utf-8")
+<body><div class='box'>
+    <h2 style='color:{box_color};'>{status_header}</h2>
+    <p style='color:#475569; font-size:14px; background:#f1f5f9; padding:12px; border-radius:8px; word-break:break-all;'>{msg_detail}</p>
+    <a href='/'>กลับสู่หน้าหลัก Dashboard</a>
+</div></body></html>""".encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.end_headers()
