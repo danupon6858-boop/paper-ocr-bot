@@ -2,8 +2,14 @@ import json
 import base64
 import time
 import re
+import io
 import urllib.request
 import urllib.error
+try:
+    from PIL import Image, ImageOps
+    HAS_PIL = True
+except ImportError:
+    HAS_PIL = False
 from config import GEMINI_API_KEY as _RAW_KEY
 API_KEY = (_RAW_KEY or "").strip()
 
@@ -371,11 +377,62 @@ def auto_repair_extracted_data(ocr_result: dict) -> dict:
         
     return ocr_result
 
+def preprocess_image(image_bytes: bytes, mime_type: str = "image/jpeg") -> tuple:
+    """
+    Preprocesses mobile-captured handwritten paper images before Gemini OCR:
+      1. Auto-rotates image according to EXIF orientation (fixes sideways/upside-down photos).
+      2. Converts color mode to standard RGB (handles RGBA/palette/CMYK).
+      3. Resizes down to max 1600px on the longest dimension (LANCZOS) to reduce latency/payload
+         while retaining 100% handwriting clarity.
+      4. Re-encodes as clean JPEG (quality=90, optimize=True).
+    Gracefully falls back to original bytes if PIL is not installed or if decoding fails.
+    """
+    if not HAS_PIL or not image_bytes:
+        return image_bytes, mime_type
+
+    try:
+        in_buf = io.BytesIO(image_bytes)
+        img = Image.open(in_buf)
+        orig_size = img.size
+        orig_bytes_len = len(image_bytes)
+
+        # 1. EXIF orientation correction
+        img = ImageOps.exif_transpose(img)
+
+        # 2. Standardize color mode to RGB
+        if img.mode != "RGB":
+            img = img.convert("RGB")
+
+        # 3. Scale down if oversized (max 1600px on longest edge)
+        max_dim = 1600
+        w, h = img.size
+        if max(w, h) > max_dim:
+            scale = max_dim / max(w, h)
+            new_size = (int(w * scale), int(h * scale))
+            resample_filter = getattr(getattr(Image, "Resampling", Image), "LANCZOS", getattr(Image, "LANCZOS", 1))
+            img = img.resize(new_size, resample=resample_filter)
+
+        # 4. Save to clean, optimized JPEG buffer
+        out_buf = io.BytesIO()
+        img.save(out_buf, format="JPEG", quality=90, optimize=True)
+        processed_bytes = out_buf.getvalue()
+
+        print(f"📸 Image preprocessed: {orig_size} -> {img.size} ({orig_bytes_len // 1024}KB -> {len(processed_bytes) // 1024}KB)")
+        return processed_bytes, "image/jpeg"
+
+    except Exception as e:
+        print(f"⚠️ Preprocessing skipped due to error: {e}")
+        return image_bytes, mime_type
+
 def extract_from_image(image_bytes: bytes, mime_type: str = "image/jpeg") -> dict:
     if not API_KEY or not str(API_KEY).strip():
         raise ValueError("ยังไม่ได้ตั้งค่า GEMINI_API_KEY ใน Render Environment Variables")
 
+    # Preprocess image (EXIF orientation, RGB normalize, resize <= 1600px, quality 90 JPEG)
+    image_bytes, mime_type = preprocess_image(image_bytes, mime_type)
+
     img_b64 = base64.b64encode(image_bytes).decode("utf-8")
+
     
     payload = {
         "system_instruction": {

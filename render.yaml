@@ -2,7 +2,7 @@ services:
   - type: web
     name: paper-ocr-bot
     runtime: python
-    buildCommand: ""
+    buildCommand: "pip install -r requirements.txt"
     startCommand: "python3 line_bot_server.py"
     envVars:
       - key: PORT
