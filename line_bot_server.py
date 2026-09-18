@@ -396,6 +396,17 @@ def handle_delete_command(text: str, user_id: str, reply_token: str) -> bool:
         for itm in cols.get(c, []):
             if itm.get("set1") == target_num and not found:
                 found = True
+                database.log_correction(
+                    scan_id=scan["id"],
+                    sheet_id=scan["sheet_id"],
+                    period_id=scan["period_id"],
+                    worker_code=scan["worker_code"],
+                    action_type="DELETE",
+                    old_set1=target_num,
+                    old_set2=itm.get("set2", ""),
+                    category=c,
+                    note="ผู้ใช้สั่งลบรายการออก (False Positive)"
+                )
                 continue
             new_cols[c].append(itm)
             
@@ -467,8 +478,23 @@ def handle_edit_command(text: str, user_id: str, reply_token: str) -> bool:
                 updated_itm["confidence"] = "high"
                 updated_itm["uncertain_note"] = ""
                 new_cols[c].append(updated_itm)
+                
+                database.log_correction(
+                    scan_id=scan["id"],
+                    sheet_id=scan["sheet_id"],
+                    period_id=scan["period_id"],
+                    worker_code=scan["worker_code"],
+                    action_type="SINGLE_EDIT",
+                    old_set1=old_s1,
+                    new_set1=parsed_new["set1"],
+                    old_set2=itm.get("set2", ""),
+                    new_set2=parsed_new["set2"] or itm.get("set2", ""),
+                    category=c,
+                    note=f"แก้ไข {old_target} เป็น {new_target}"
+                )
             else:
                 new_cols[c].append(itm)
+
                 
     if not found:
         reply_line_message(reply_token, f"⚠️ ไม่พบเลข {old_s1} ในใบที่ {scan['sheet_id']} ครับ")
@@ -505,7 +531,9 @@ def handle_image_message(message_id: str, reply_token: str, user_id: str, user_i
         img_bytes = get_line_image_content(message_id)
         
         print("Processing OCR with Gemini 3.6 Flash...")
+        ocr_start_time = time.time()
         ocr_result = ocr_engine.extract_from_image(img_bytes)
+        ocr_latency_ms = int((time.time() - ocr_start_time) * 1000)
         
         # Check if any data extracted
         raw_cols = ocr_result.get("columns", {}) if ocr_result else {}
@@ -540,6 +568,9 @@ def handle_image_message(message_id: str, reply_token: str, user_id: str, user_i
         ocr_result["header"]["sheet_id"] = formatted_sheet_id
         ocr_result["header"]["customer_name"] = emp_name
 
+        # Save uploaded image to disk for training archive and dashboard viewing
+        image_path = database.save_uploaded_image(img_bytes, active_p["id"], formatted_sheet_id)
+
         # 2. Check Duplicate Sheet
         is_dup, dup_msg = database.check_duplicate_sheet(
             active_p["id"], formatted_sheet_id, val_result.get("validated_columns", {})
@@ -556,8 +587,10 @@ def handle_image_message(message_id: str, reply_token: str, user_id: str, user_i
 
         # 3. Create Pending Scan
         scan_id = database.create_pending_scan(
-            user_id, worker_code, emp_name, active_p["id"], formatted_sheet_id, ocr_result, val_result
+            user_id, worker_code, emp_name, active_p["id"], formatted_sheet_id, ocr_result, val_result,
+            image_path=image_path, ocr_latency_ms=ocr_latency_ms
         )
+
 
         valid_cols = val_result.get("validated_columns", {})
         top_items = valid_cols.get("top", [])
@@ -841,6 +874,14 @@ def handle_text_message(text: str, reply_token: str, user_id: str, is_owner: boo
         if pending_scan:
             scan_id = pending_scan["id"]
             sheet_id = pending_scan["sheet_id"]
+            database.log_correction(
+                scan_id=scan_id,
+                sheet_id=sheet_id,
+                period_id=pending_scan["period_id"],
+                worker_code=worker_code,
+                action_type="BULK_EDIT",
+                note="พนักงานคัดลอกข้อความไปแก้ไขทั้งใบและส่งกลับมา"
+            )
             database.update_pending_scan_items(scan_id, parsed_sheet["columns"])
         else:
             raw_s = parsed_sheet.get("sheet_id") or "1"
@@ -956,7 +997,7 @@ def render_edit_page(scan_id: int) -> str:
 """
     return html
 
-def render_html_dashboard(period_id: Optional[int] = None) -> str:
+def render_html_dashboard(period_id: Optional[int] = None, scope: str = "period", active_tab: str = "live") -> str:
     all_periods = database.get_all_periods()
     active_period = database.get_active_period()
     latest_period = database.get_latest_period()
@@ -981,8 +1022,18 @@ def render_html_dashboard(period_id: Optional[int] = None) -> str:
     ORDER BY sheet_db_id ASC, id ASC
     """, (p_id,))
     rows = cursor.fetchall()
+
+    # Recent sheet images
+    cursor.execute("""
+    SELECT sheet_id, employee_name, worker_code, image_path, created_at
+    FROM sheets
+    WHERE period_id = ? AND image_path != ''
+    ORDER BY id DESC LIMIT 12
+    """, (p_id,))
+    recent_sheets = cursor.fetchall()
     conn.close()
 
+    # Data for Tab 1 (Live Board)
     top_items = []
     bot_items = []
     topbot_items = []
@@ -1022,7 +1073,125 @@ def render_html_dashboard(period_id: Optional[int] = None) -> str:
     else:
         table_rows_html = f"<tr><td colspan='4' style='text-align:center; padding:40px; color:#94a3b8;'>ยังไม่มีข้อมูลใน {p_name} ส่งรูปถ่ายผ่าน LINE เข้ามาได้เลยครับ</td></tr>"
 
-    # Pending Users Approval Section
+    # Recent sheet photos HTML
+    sheet_photos_html = ""
+    if recent_sheets:
+        badges = []
+        for s in recent_sheets:
+            sid = s["sheet_id"]
+            img_url = f"/{s['image_path']}"
+            w_code = s["worker_code"] or "A"
+            badges.append(f'<a href="{img_url}" target="_blank" class="sheet-photo-badge">📷 {sid} ({w_code})</a>')
+        sheet_photos_html = f"""
+        <div class="sheet-photos-bar">
+            <span style="font-size:13px; font-weight:700; color:#475569;">🖼️ รูปกระดาษจริง ({len(recent_sheets)} ใบล่าสุด):</span>
+            <div class="sheet-photos-list">{' '.join(badges)}</div>
+        </div>
+        """
+
+    # Data for Tab 2 (Set 1 Insights)
+    is_all_time = (scope == "all")
+    target_pid = None if is_all_time else p_id
+    s1_stats = database.get_set1_analytics(target_pid)
+    tot_s1 = s1_stats["total_entries"] or 1
+
+    cnt2 = s1_stats["length_counts"].get("2", 0)
+    cnt3 = s1_stats["length_counts"].get("3", 0)
+    cnt4 = s1_stats["length_counts"].get("4", 0)
+    pct2 = round(cnt2 / tot_s1 * 100, 1)
+    pct3 = round(cnt3 / tot_s1 * 100, 1)
+    pct4 = round(cnt4 / tot_s1 * 100, 1)
+
+    pat_counts = s1_stats["pattern_counts"]
+    
+    top20_html = ""
+    for idx, item in enumerate(s1_stats["top_by_freq"], 1):
+        num = item["set1"]
+        pat = database.classify_number_pattern(num)
+        cnt = item["count"]
+        vol_str = f"{int(item['volume']):,}" if item["volume"] > 0 else "-"
+        top20_html += f"""
+        <tr>
+            <td style="text-align:center; font-weight:700; color:#64748b;">#{idx}</td>
+            <td><strong style="font-size:18px; color:#0f172a; font-family:monospace;">{num}</strong></td>
+            <td><span class="badge-pat">{pat}</span></td>
+            <td style="text-align:center; font-weight:800; color:#2563eb;">{cnt} ครั้ง</td>
+            <td style="text-align:center; color:#1d4ed8; font-weight:600;">{item['top']}</td>
+            <td style="text-align:center; color:#dc2626; font-weight:600;">{item['bottom']}</td>
+            <td style="text-align:center; color:#7c3aed; font-weight:600;">{item['top_bottom']}</td>
+            <td style="text-align:right; font-weight:700; color:#059669;">{vol_str}</td>
+        </tr>
+        """
+    if not top20_html:
+        top20_html = "<tr><td colspan='8' style='text-align:center; color:#94a3b8; padding:20px;'>ยังไม่มีข้อมูลตัวเลข</td></tr>"
+
+    # Data for Tab 3 (AI Feedback & Accuracy)
+    ai_metrics = database.get_ai_feedback_metrics(target_pid)
+    
+    misread_html = ""
+    for pair, count in ai_metrics["top_misread"]:
+        misread_html += f"""
+        <tr>
+            <td><strong style="color:#dc2626; font-size:16px;">{pair}</strong></td>
+            <td style="text-align:center; font-weight:800; color:#0f172a;">{count} ครั้ง</td>
+        </tr>
+        """
+    if not misread_html:
+        misread_html = "<tr><td colspan='2' style='text-align:center; color:#16a34a; padding:20px;'>✅ ยอดเยี่ยม! ยังไม่พบประวัติการอ่านผิดซ้ำในชุดข้อมูลนี้</td></tr>"
+
+    corr_html = ""
+    for c in ai_metrics["recent_corrections"][:30]:
+        t_str = c["created_at"][11:16] if len(c.get("created_at", "")) >= 16 else ""
+        sid = c["sheet_id"] or "-"
+        w_code = c["worker_code"] or "A"
+        act = c["action_type"]
+        act_badge = '<span class="badge-edit">แก้ไข</span>' if act == 'SINGLE_EDIT' else ('<span class="badge-del">ลบออก</span>' if act == 'DELETE' else '<span class="badge-bulk">แก้ทั้งใบ</span>')
+        old_val = c.get("old_set1", "") or "-"
+        new_val = c.get("new_set1", "") or "-"
+        detail = f"{old_val} ➔ <strong>{new_val}</strong>" if act == 'SINGLE_EDIT' else (f"ลบเลข {old_val}" if act == 'DELETE' else "แก้ข้อมูลตาราง")
+        corr_html += f"""
+        <tr>
+            <td style="color:#64748b; font-size:12px;">{t_str}</td>
+            <td><strong>{sid}</strong></td>
+            <td style="text-align:center;"><span class="badge-worker">{w_code}</span></td>
+            <td style="text-align:center;">{act_badge}</td>
+            <td>{detail}</td>
+            <td style="color:#64748b; font-size:12px;">{c.get('note', '')}</td>
+        </tr>
+        """
+    if not corr_html:
+        corr_html = "<tr><td colspan='6' style='text-align:center; color:#94a3b8; padding:20px;'>ยังไม่มีบันทึกการแก้ไข</td></tr>"
+
+    # Data for Tab 4 (Staff & Peak Hours)
+    staff_metrics = database.get_staff_and_peak_metrics(target_pid)
+    
+    hourly_bars_html = ""
+    max_hour_count = max(staff_metrics["hourly"].values(), default=1) or 1
+    for h_int in range(6, 23):
+        h_str = f"{h_int:02d}"
+        cnt = staff_metrics["hourly"].get(h_str, 0)
+        h_pct = int(cnt / max_hour_count * 100) if max_hour_count > 0 else 0
+        hourly_bars_html += f"""
+        <div class="bar-col">
+            <div class="bar-val">{cnt if cnt > 0 else ''}</div>
+            <div class="bar-fill" style="height: {max(h_pct, 4)}%;"></div>
+            <div class="bar-label">{h_str}</div>
+        </div>
+        """
+
+    workers_html = ""
+    for w in staff_metrics["workers"]:
+        workers_html += f"""
+        <tr>
+            <td style="text-align:center;"><strong style="color:#2563eb; font-size:16px;">{w['worker_code']}</strong></td>
+            <td><strong>{w['employee_name']}</strong></td>
+            <td style="text-align:right; font-weight:700; color:#0f172a;">{w['total_sheets']} แผ่น</td>
+        </tr>
+        """
+    if not workers_html:
+        workers_html = "<tr><td colspan='3' style='text-align:center; color:#94a3b8; padding:20px;'>ยังไม่มีข้อมูลพนักงานส่งงาน</td></tr>"
+
+    # User Approval & Period controls HTML
     pending_users = database.get_pending_users()
     pending_users_html = ""
     if pending_users:
@@ -1055,7 +1224,6 @@ def render_html_dashboard(period_id: Optional[int] = None) -> str:
         </div>
         """
 
-    # Period Toggle Button
     if p_is_open:
         period_control_html = f"""
         <div class="period-banner banner-open">
@@ -1102,14 +1270,21 @@ def render_html_dashboard(period_id: Optional[int] = None) -> str:
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>กระดานสรุปตัวเลข Real-Time</title>
-    <meta http-equiv="refresh" content="15">
+    <title>ระบบจัดการตัวเลข & มอนิเตอร์ AI</title>
     <style>
         * {{ box-sizing: border-box; font-family: -apple-system, BlinkMacSystemFont, "Prompt", "Segoe UI", Roboto, sans-serif; }}
         body {{ background: #f8fafc; color: #1e293b; margin: 0; padding: 16px; }}
         .header {{ display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; margin-bottom: 16px; }}
-        .title {{ font-size: 22px; font-weight: 700; color: #0f172a; margin: 0; }}
+        .title {{ font-size: 22px; font-weight: 800; color: #0f172a; margin: 0; }}
         
+        .tab-nav {{ display: flex; gap: 8px; border-bottom: 2px solid #e2e8f0; margin-bottom: 20px; overflow-x: auto; padding-bottom: 2px; }}
+        .tab-btn {{ padding: 10px 18px; border: none; background: none; font-size: 15px; font-weight: 700; color: #64748b; cursor: pointer; border-radius: 8px 8px 0 0; white-space: nowrap; transition: all 0.15s; }}
+        .tab-btn:hover {{ color: #2563eb; background: #eff6ff; }}
+        .tab-btn.active {{ color: #2563eb; border-bottom: 3px solid #2563eb; background: #eff6ff; }}
+
+        .tab-content {{ display: none; }}
+        .tab-content.active {{ display: block; }}
+
         .period-banner {{ padding: 14px 18px; border-radius: 12px; margin-bottom: 16px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; }}
         .banner-open {{ background: #dcfce7; border: 1px solid #bbf7d0; color: #166534; }}
         .banner-closed {{ background: #fee2e2; border: 1px solid #fecaca; color: #991b1b; }}
@@ -1123,7 +1298,7 @@ def render_html_dashboard(period_id: Optional[int] = None) -> str:
         .toolbar {{ display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 16px; }}
         .period-select {{ padding: 10px 14px; border: 1px solid #cbd5e1; border-radius: 10px; font-size: 14px; font-weight: 600; background: white; }}
 
-        .stats-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 12px; margin-bottom: 20px; }}
+        .stats-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 12px; margin-bottom: 20px; }}
         .stat-card {{ background: white; border: 1px solid #e2e8f0; border-radius: 12px; padding: 14px; text-align: center; box-shadow: 0 1px 3px rgba(0,0,0,0.05); }}
         .stat-num {{ font-size: 24px; font-weight: 800; color: #0f172a; margin-top: 4px; }}
         .stat-label {{ font-size: 12px; color: #64748b; font-weight: 600; text-transform: uppercase; }}
@@ -1131,83 +1306,282 @@ def render_html_dashboard(period_id: Optional[int] = None) -> str:
         .search-box {{ margin-bottom: 16px; display: flex; gap: 10px; }}
         .search-input {{ flex: 1; padding: 12px 16px; border: 1px solid #cbd5e1; border-radius: 10px; font-size: 15px; outline: none; background: white; }}
         .search-input:focus {{ border-color: #2563eb; box-shadow: 0 0 0 3px rgba(37,99,235,0.1); }}
-        .btn-export {{ background: #059669; color: white; border: none; padding: 12px 18px; border-radius: 10px; font-weight: 600; text-decoration: none; font-size: 14px; display: inline-flex; align-items: center; gap: 6px; cursor: pointer; white-space: nowrap; }}
 
-        .table-container {{ background: white; border: 1px solid #e2e8f0; border-radius: 12px; overflow-x: auto; box-shadow: 0 1px 3px rgba(0,0,0,0.05); }}
-        table {{ width: 100%; border-collapse: collapse; text-align: left; font-size: 15px; }}
-        th {{ background: #f1f5f9; padding: 14px 18px; font-weight: 800; color: #1e293b; border-bottom: 2px solid #cbd5e1; }}
-        th.th-top {{ color: #2563eb; font-size: 16px; }}
-        th.th-bot {{ color: #dc2626; font-size: 16px; }}
-        th.th-topbot {{ color: #7c3aed; font-size: 16px; }}
-        td {{ padding: 12px 18px; border-bottom: 1px solid #f1f5f9; }}
+        .btn-export {{ background: #059669; color: white; border: none; padding: 10px 16px; border-radius: 10px; font-weight: 600; text-decoration: none; font-size: 13px; display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }}
+        .btn-dataset {{ background: #4f46e5; color: white; border: none; padding: 10px 16px; border-radius: 10px; font-weight: 600; text-decoration: none; font-size: 13px; display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }}
+
+        .table-container {{ background: white; border: 1px solid #e2e8f0; border-radius: 12px; overflow-x: auto; box-shadow: 0 1px 3px rgba(0,0,0,0.05); margin-bottom: 20px; }}
+        table {{ width: 100%; border-collapse: collapse; text-align: left; font-size: 14px; }}
+        th {{ background: #f1f5f9; padding: 12px 16px; font-weight: 800; color: #1e293b; border-bottom: 2px solid #cbd5e1; }}
+        td {{ padding: 10px 16px; border-bottom: 1px solid #f1f5f9; }}
         tr:hover {{ background: #f8fafc; }}
+
+        .sheet-photos-bar {{ background: white; padding: 12px 16px; border-radius: 12px; border: 1px solid #e2e8f0; margin-bottom: 16px; }}
+        .sheet-photos-list {{ display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }}
+        .sheet-photo-badge {{ background: #eff6ff; color: #1d4ed8; text-decoration: none; font-size: 12px; font-weight: 700; padding: 5px 10px; border-radius: 6px; border: 1px solid #bfdbfe; transition: all 0.15s; }}
+        .sheet-photo-badge:hover {{ background: #2563eb; color: white; }}
+
+        .scope-pills {{ display: inline-flex; background: #e2e8f0; padding: 4px; border-radius: 10px; gap: 4px; margin-bottom: 16px; }}
+        .scope-pill {{ padding: 6px 14px; border-radius: 8px; font-size: 13px; font-weight: 700; text-decoration: none; color: #64748b; }}
+        .scope-pill.active {{ background: white; color: #0f172a; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }}
+
+        .badge-pat {{ background: #f3e8ff; color: #7e22ce; font-size: 11px; font-weight: 700; padding: 3px 8px; border-radius: 6px; }}
+        .badge-edit {{ background: #fef3c7; color: #b45309; font-size: 11px; font-weight: 700; padding: 3px 8px; border-radius: 6px; }}
+        .badge-del {{ background: #fee2e2; color: #b91c1c; font-size: 11px; font-weight: 700; padding: 3px 8px; border-radius: 6px; }}
+        .badge-bulk {{ background: #e0e7ff; color: #3730a3; font-size: 11px; font-weight: 700; padding: 3px 8px; border-radius: 6px; }}
+        .badge-worker {{ background: #e2e8f0; color: #334155; font-size: 11px; font-weight: 700; padding: 3px 8px; border-radius: 6px; }}
+
+        .bars-container {{ display: flex; align-items: flex-end; gap: 8px; height: 160px; padding: 16px 8px 8px 8px; background: white; border-radius: 12px; border: 1px solid #e2e8f0; overflow-x: auto; margin-bottom: 20px; }}
+        .bar-col {{ flex: 1; min-width: 28px; display: flex; flex-direction: column; align-items: center; height: 100%; justify-content: flex-end; }}
+        .bar-fill {{ width: 100%; background: linear-gradient(180deg, #3b82f6 0%, #1d4ed8 100%); border-radius: 4px 4px 0 0; min-height: 4px; transition: height 0.3s; }}
+        .bar-val {{ font-size: 10px; font-weight: 700; color: #64748b; margin-bottom: 4px; }}
+        .bar-label {{ font-size: 11px; color: #94a3b8; margin-top: 6px; }}
+
         .footer-note {{ text-align: center; color: #94a3b8; font-size: 12px; margin-top: 20px; }}
     </style>
 </head>
 <body>
     <div class="header">
         <div>
-            <h1 class="title">📋 กระดานสรุปตัวเลข Real-Time</h1>
-            <div style="font-size: 13px; color:#64748b; margin-top:4px;">ระบบบันทึกลายมืออัตโนมัติ 24 ชม.</div>
+            <h1 class="title">📊 กระดานจัดการตัวเลข & มอนิเตอร์ AI</h1>
+            <div style="font-size: 13px; color:#64748b; margin-top:4px;">ระบบวิเคราะห์ตัวเลขชุดที่ 1 & ตรวจจับความแม่นยำ AI เรียลไทม์</div>
         </div>
-        <div style="display:flex; gap:8px;">
+        <div style="display:flex; gap:8px; flex-wrap:wrap;">
             <a href="/export?period_id={p_id}" class="btn-export" download>📥 ดาวน์โหลด Excel (.CSV)</a>
+            <a href="/export-ai-dataset?period_id={p_id}" class="btn-dataset" download>💾 ดาวน์โหลด AI Dataset (.JSON)</a>
         </div>
     </div>
 
     {pending_users_html}
     {period_control_html}
 
-    <div class="toolbar">
-        <div>
-            <label style="font-size:13px; font-weight:700; color:#475569;">📁 เลือกดูงวด:</label>
-            <select class="period-select" onchange="window.location='/?period_id=' + this.value">
-                {period_options_html}
-            </select>
+    <div class="tab-nav">
+        <button class="tab-btn active" id="btn-tab-live" onclick="switchTab('live')">📋 กระดานสด (Live Board)</button>
+        <button class="tab-btn" id="btn-tab-set1" onclick="switchTab('set1')">📈 สถิติชุดที่ 1 (Set 1 Insights)</button>
+        <button class="tab-btn" id="btn-tab-ai" onclick="switchTab('ai')">🎯 ประสิทธิภาพ AI (AI Feedback)</button>
+        <button class="tab-btn" id="btn-tab-staff" onclick="switchTab('staff')">👥 ทีมงาน & ชั่วโมงพีค</button>
+    </div>
+
+    <!-- ==================== TAB 1: LIVE BOARD ==================== -->
+    <div id="tab-live" class="tab-content active">
+        {sheet_photos_html}
+
+        <div class="toolbar">
+            <div>
+                <label style="font-size:13px; font-weight:700; color:#475569;">📁 เลือกดูงวด:</label>
+                <select class="period-select" onchange="window.location='/?period_id=' + this.value + '&tab=live'">
+                    {period_options_html}
+                </select>
+            </div>
+        </div>
+
+        <div class="stats-grid">
+            <div class="stat-card">
+                <div class="stat-label">เอกสารงวดนี้</div>
+                <div class="stat-num" style="color:#2563eb">{summary['total_sheets']} แผ่น</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">รายการทั้งหมด</div>
+                <div class="stat-num" style="color:#059669">{summary['total_entries']} รายการ</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">หมวด "บน"</div>
+                <div class="stat-num" style="color:#2563eb">{len(top_items)}</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">หมวด "ล่าง"</div>
+                <div class="stat-num" style="color:#dc2626">{len(bot_items)}</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">หมวด "บนล่าง"</div>
+                <div class="stat-num" style="color:#7c3aed">{len(topbot_items)}</div>
+            </div>
+        </div>
+
+        <div class="search-box">
+            <input type="text" id="searchInput" class="search-input" placeholder="🔍 พิมพ์ค้นหาตัวเลขในงวดนี้ เช่น 401, 370, 12..." onkeyup="filterTable()">
+        </div>
+
+        <div class="table-container">
+            <table id="dataTable">
+                <thead>
+                    <tr>
+                        <th style="width: 80px; text-align: center;">ลำดับ</th>
+                        <th style="color:#2563eb;">บน ({len(top_items)})</th>
+                        <th style="color:#dc2626;">ล่าง ({len(bot_items)})</th>
+                        <th style="color:#7c3aed;">บนล่าง ({len(topbot_items)})</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {table_rows_html}
+                </tbody>
+            </table>
         </div>
     </div>
 
-    <div class="stats-grid">
-        <div class="stat-card">
-            <div class="stat-label">เอกสารงวดนี้</div>
-            <div class="stat-num" style="color:#2563eb">{summary['total_sheets']} แผ่น</div>
+    <!-- ==================== TAB 2: SET 1 INSIGHTS ==================== -->
+    <div id="tab-set1" class="tab-content">
+        <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px; margin-bottom:14px;">
+            <div class="scope-pills">
+                <a href="/?period_id={p_id}&scope=period&tab=set1" class="scope-pill {'active' if not is_all_time else ''}">📍 เฉพาะงวดนี้ ({p_name})</a>
+                <a href="/?period_id={p_id}&scope=all&tab=set1" class="scope-pill {'active' if is_all_time else ''}">🌐 ตลอดกาล (All-Time)</a>
+            </div>
+            <span style="font-size:13px; color:#64748b; font-weight:600;">ชุดตัวเลขที่นำมาวิเคราะห์: {tot_s1} รายการ</span>
         </div>
-        <div class="stat-card">
-            <div class="stat-label">รายการทั้งหมด</div>
-            <div class="stat-num" style="color:#059669">{summary['total_entries']} รายการ</div>
+
+        <h3 style="margin:0 0 10px 0; font-size:16px; color:#0f172a;">📊 สัดส่วนจำนวนหลักของตัวเลขชุดที่ 1</h3>
+        <div class="stats-grid" style="grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));">
+            <div class="stat-card" style="border-left: 4px solid #2563eb;">
+                <div class="stat-label">เลข 2 หลัก</div>
+                <div class="stat-num" style="color:#2563eb">{cnt2:,} <span style="font-size:14px; color:#64748b;">({pct2}%)</span></div>
+            </div>
+            <div class="stat-card" style="border-left: 4px solid #059669;">
+                <div class="stat-label">เลข 3 หลัก</div>
+                <div class="stat-num" style="color:#059669">{cnt3:,} <span style="font-size:14px; color:#64748b;">({pct3}%)</span></div>
+            </div>
+            <div class="stat-card" style="border-left: 4px solid #7c3aed;">
+                <div class="stat-label">เลข 4 หลัก</div>
+                <div class="stat-num" style="color:#7c3aed">{cnt4:,} <span style="font-size:14px; color:#64748b;">({pct4}%)</span></div>
+            </div>
         </div>
-        <div class="stat-card">
-            <div class="stat-label">หมวด "บน"</div>
-            <div class="stat-num" style="color:#2563eb">{len(top_items)}</div>
+
+        <h3 style="margin:16px 0 10px 0; font-size:16px; color:#0f172a;">🎲 จำแนกตามรูปแบบตัวเลขพิเศษ</h3>
+        <div class="stats-grid">
+            <div class="stat-card">
+                <div class="stat-label">เลขเบิ้ล (11, 22)</div>
+                <div class="stat-num" style="color:#d97706">{pat_counts.get('เลขเบิ้ล', 0):,}</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">เลขหาม (121, 505)</div>
+                <div class="stat-num" style="color:#0284c7">{pat_counts.get('เลขหาม', 0):,}</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">เลขตอง (111, 777)</div>
+                <div class="stat-num" style="color:#dc2626">{pat_counts.get('เลขตอง', 0):,}</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">เลขเรียง (123, 789)</div>
+                <div class="stat-num" style="color:#16a34a">{pat_counts.get('เลขเรียง', 0):,}</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">เลขทั่วไป</div>
+                <div class="stat-num" style="color:#64748b">{pat_counts.get('เลขทั่วไป', 0):,}</div>
+            </div>
         </div>
-        <div class="stat-card">
-            <div class="stat-label">หมวด "ล่าง"</div>
-            <div class="stat-num" style="color:#dc2626">{len(bot_items)}</div>
-        </div>
-        <div class="stat-card">
-            <div class="stat-label">หมวด "บนล่าง"</div>
-            <div class="stat-num" style="color:#7c3aed">{len(topbot_items)}</div>
+
+        <h3 style="margin:16px 0 10px 0; font-size:16px; color:#0f172a;">🏆 Top 20 เลขยอดฮิตที่มีคนส่งเยอะที่สุด ({'ตลอดกาล' if is_all_time else p_name})</h3>
+        <div class="table-container">
+            <table>
+                <thead>
+                    <tr>
+                        <th style="width:60px; text-align:center;">อันดับ</th>
+                        <th>เลขชุดที่ 1</th>
+                        <th>รูปแบบ</th>
+                        <th style="text-align:center;">จำนวนครั้งที่พบ</th>
+                        <th style="text-align:center;">หมวด บน</th>
+                        <th style="text-align:center;">หมวด ล่าง</th>
+                        <th style="text-align:center;">หมวด บนล่าง</th>
+                        <th style="text-align:right;">ยอดรวม Set 2</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {top20_html}
+                </tbody>
+            </table>
         </div>
     </div>
 
-    <div class="search-box">
-        <input type="text" id="searchInput" class="search-input" placeholder="🔍 พิมพ์ค้นหาตัวเลขในงวดนี้ เช่น 401, 370, 12..." onkeyup="filterTable()">
+    <!-- ==================== TAB 3: AI FEEDBACK & ACCURACY ==================== -->
+    <div id="tab-ai" class="tab-content">
+        <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px; margin-bottom:14px;">
+            <div class="scope-pills">
+                <a href="/?period_id={p_id}&scope=period&tab=ai" class="scope-pill {'active' if not is_all_time else ''}">📍 เฉพาะงวดนี้</a>
+                <a href="/?period_id={p_id}&scope=all&tab=ai" class="scope-pill {'active' if is_all_time else ''}">🌐 ตลอดกาล (All-Time)</a>
+            </div>
+        </div>
+
+        <div class="stats-grid" style="grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));">
+            <div class="stat-card" style="border-left: 4px solid #16a34a;">
+                <div class="stat-label">ความแม่นยำรอบแรก (Clean Rate)</div>
+                <div class="stat-num" style="color:#16a34a;">{ai_metrics['clean_rate']}%</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">กระดาษที่ผ่าน 100% โดยไม่แก้</div>
+                <div class="stat-num" style="color:#0f172a;">{ai_metrics['clean_scans']} / {ai_metrics['total_scans']} <span style="font-size:12px; color:#64748b;">แผ่น</span></div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">เวลาประมวลผล AI เฉลี่ย</div>
+                <div class="stat-num" style="color:#2563eb;">{ai_metrics['avg_latency_s']} <span style="font-size:12px; color:#64748b;">วินาที</span></div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">รายการที่มนุษย์แก้ไข</div>
+                <div class="stat-num" style="color:#d97706;">{len(ai_metrics['recent_corrections']):,} <span style="font-size:12px; color:#64748b;">ครั้ง</span></div>
+            </div>
+        </div>
+
+        <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap:16px;">
+            <div>
+                <h3 style="margin:10px 0; font-size:16px; color:#0f172a;">🔴 คู่ตัวเลขที่ AI มักสับสน/อ่านผิดบ่อยที่สุด</h3>
+                <div class="table-container">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>คู่ตัวเลขที่อ่านผิด (AI ➔ ความจริง)</th>
+                                <th style="text-align:center; width:120px;">จำนวนครั้ง</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {misread_html}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <div>
+                <h3 style="margin:10px 0; font-size:16px; color:#0f172a;">📝 ประวัติการแก้ไขล่าสุดของพนักงาน (Feedback Log)</h3>
+                <div class="table-container">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>เวลา</th>
+                                <th>ใบที่</th>
+                                <th>พนักงาน</th>
+                                <th>การกระทำ</th>
+                                <th>รายละเอียด</th>
+                                <th>โน้ต</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {corr_html}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
     </div>
 
-    <div class="table-container">
-        <table id="dataTable">
-            <thead>
-                <tr>
-                    <th style="width: 80px; text-align: center;">ลำดับ</th>
-                    <th class="th-top">บน ({len(top_items)})</th>
-                    <th class="th-bot">ล่าง ({len(bot_items)})</th>
-                    <th class="th-topbot">บนล่าง ({len(topbot_items)})</th>
-                </tr>
-            </thead>
-            <tbody>
-                {table_rows_html}
-            </tbody>
-        </table>
+    <!-- ==================== TAB 4: STAFF & PEAK HOURS ==================== -->
+    <div id="tab-staff" class="tab-content">
+        <h3 style="margin:0 0 10px 0; font-size:16px; color:#0f172a;">⏰ กราฟช่วงเวลาส่งงานหนาแน่นรายชั่วโมง (Peak Hours)</h3>
+        <div class="bars-container">
+            {hourly_bars_html}
+        </div>
+
+        <h3 style="margin:16px 0 10px 0; font-size:16px; color:#0f172a;">👥 สถิติการส่งงานแยกรายพนักงาน</h3>
+        <div class="table-container">
+            <table>
+                <thead>
+                    <tr>
+                        <th style="width:80px; text-align:center;">รหัส</th>
+                        <th>ชื่อพนักงาน</th>
+                        <th style="text-align:right;">จำนวนแผ่นที่บันทึกสำเร็จ</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {workers_html}
+                </tbody>
+            </table>
+        </div>
     </div>
 
     <div class="footer-note">
@@ -1215,6 +1589,25 @@ def render_html_dashboard(period_id: Optional[int] = None) -> str:
     </div>
 
     <script>
+        function switchTab(tabId) {{
+            document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+            document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+            
+            const btn = document.getElementById('btn-tab-' + tabId);
+            const content = document.getElementById('tab-' + tabId);
+            if (btn && content) {{
+                btn.classList.add('active');
+                content.classList.add('active');
+            }}
+        }}
+
+        // Read active tab from URL query
+        const urlParams = new URLSearchParams(window.location.search);
+        const requestedTab = urlParams.get('tab') || '{active_tab}';
+        if (requestedTab && requestedTab !== 'live') {{
+            switchTab(requestedTab);
+        }}
+
         function filterTable() {{
             var input = document.getElementById('searchInput');
             var filter = input.value.toUpperCase();
@@ -1277,6 +1670,69 @@ class LineWebhookHandler(http.server.BaseHTTPRequestHandler):
                 self.wfile.write(f.read())
             return
 
+        if path.startswith("/uploads/"):
+            clean_subpath = os.path.normpath(path.replace("/uploads/", "", 1))
+            full_path = os.path.join(database.UPLOADS_DIR, clean_subpath)
+            if not full_path.startswith(database.UPLOADS_DIR) or not os.path.isfile(full_path):
+                self.send_response(404)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(b"Image not found")
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "image/jpeg")
+            self.send_header("Cache-Control", "public, max-age=86400")
+            self.end_headers()
+            with open(full_path, "rb") as f:
+                self.wfile.write(f.read())
+            return
+
+        if path == "/export-ai-dataset":
+            p_id = int(qs.get("period_id", [0])[0]) or None
+            conn = database.get_db_connection()
+            cursor = conn.cursor()
+            p_filter = "WHERE s.period_id = ?" if p_id else ""
+            p_params = (p_id,) if p_id else ()
+            cursor.execute(f"""
+            SELECT s.sheet_id, s.period_id, s.worker_code, s.employee_name, s.image_path, s.raw_json, s.created_at
+            FROM sheets s
+            {p_filter}
+            ORDER BY s.id DESC
+            """, p_params)
+            sheets_rows = cursor.fetchall()
+            dataset = []
+            for sr in sheets_rows:
+                sid = sr["sheet_id"]
+                cursor.execute("""
+                SELECT category, set1, set3, set2, is_valid
+                FROM entries
+                WHERE sheet_id = ?
+                """, (sid,))
+                e_rows = [dict(er) for er in cursor.fetchall()]
+                raw_ocr = {}
+                try:
+                    raw_ocr = json.loads(sr["raw_json"])
+                except Exception:
+                    pass
+                dataset.append({
+                    "sheet_id": sid,
+                    "worker_code": sr["worker_code"],
+                    "employee_name": sr["employee_name"],
+                    "image_url": f"/{sr['image_path']}" if sr["image_path"] else "",
+                    "raw_ocr": raw_ocr,
+                    "ground_truth_entries": e_rows,
+                    "created_at": sr["created_at"]
+                })
+            conn.close()
+            payload = json.dumps(dataset, ensure_ascii=False, indent=2).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Disposition", 'attachment; filename="ai_training_dataset.json"')
+            self.end_headers()
+            self.wfile.write(payload)
+            return
+
+
         if path.startswith("/edit/"):
             m = re.match(r"^/edit/(\d+)$", path)
             if m:
@@ -1290,7 +1746,9 @@ class LineWebhookHandler(http.server.BaseHTTPRequestHandler):
 
         # Default: Dashboard
         p_id = int(qs.get("period_id", [0])[0]) or None
-        html_content = render_html_dashboard(p_id).encode('utf-8')
+        scope = qs.get("scope", ["period"])[0]
+        tab = qs.get("tab", ["live"])[0]
+        html_content = render_html_dashboard(p_id, scope, tab).encode('utf-8')
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.end_headers()
