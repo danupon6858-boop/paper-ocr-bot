@@ -323,7 +323,22 @@ def parse_sheet_text(text: str) -> Optional[dict]:
     columns = {"top": [], "bottom": [], "top_bottom": []}
     has_entries = False
     
+    # Patterns for lines to skip (separators, hints, badges, emojis-only)
+    SKIP_PATTERNS = [
+        r"^─+$",                        # ─────── separator line
+        r"^[-─=*]{3,}$",               # --- or === separator
+        r"^[📊📌📋✅✏️⚠️❌💡]\s",     # emoji-only hint lines
+        r"^(✅|❌|⚠️|💡|📊|📌|📋|✏️)",  # leading emoji hint
+        r"^ตรวจพบ:|^อ่านข้อมูลได้|^ผู้ส่ง:|^ข้อมูลนี้จะถูก|^จุดที่ AI",  # summary header lines
+        r"^AI ไม่มั่นใจ|^หากตรวจสอบ|^หากถูกต้อง|^คัดลอก|^กดปุ่ม",     # hint text
+    ]
+    SKIP_RE = re.compile("|".join(SKIP_PATTERNS), re.UNICODE)
+    
     for line in lines:
+        # Skip separator/hint lines
+        if SKIP_RE.search(line):
+            continue
+
         # Flexible sheet header matching (e.g. ใบที่ 1, ใบ A-1, แผ่นที่ 2, No. 5, #3, เลขที่ 10)
         m_sheet = re.search(r'(?:ใบที่|ใบ|แผ่นที่|แผ่น|no\.?|#|เลขที่)\s*[:\-]?\s*([A-Za-z0-9\-_/]+)', line, re.IGNORECASE)
         if m_sheet:
@@ -346,6 +361,7 @@ def parse_sheet_text(text: str) -> Optional[dict]:
         return None
         
     return {"sheet_id": sheet_id, "columns": columns}
+
 
 
 def handle_delete_command(text: str, user_id: str, reply_token: str) -> bool:
@@ -1231,7 +1247,7 @@ class LineWebhookHandler(http.server.BaseHTTPRequestHandler):
             import ocr_engine
             info = {
                 "status": "ok",
-                "version": "v2.1-quick-approve",
+                "version": "v2.3-confident-ocr",
                 "primary_model": f"{ocr_engine.MODELS_CONFIG[0][0]}/{ocr_engine.MODELS_CONFIG[0][1]}",
                 "models": ocr_engine.MODELS_CONFIG,
                 "api_key_configured": bool(ocr_engine.API_KEY),

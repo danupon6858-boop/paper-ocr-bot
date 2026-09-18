@@ -138,6 +138,11 @@ RESPONSE_SCHEMA = {
             },
             "required": ["sheet_id", "date"]
         },
+        "unclear_notes": {
+            "type": "ARRAY",
+            "description": "รายการจุดที่ไม่ชัดเจนในภาพ เช่น ตัวเลขที่เบลอหรืออ่านไม่ออก",
+            "items": {"type": "STRING"}
+        },
         "columns": {
             "type": "OBJECT",
             "properties": {
@@ -147,12 +152,14 @@ RESPONSE_SCHEMA = {
                     "items": {
                         "type": "OBJECT",
                         "properties": {
-                            "set1": {"type": "STRING", "description": "ชุด 1: ตัวเลข 2-4 หลัก"},
+                            "set1": {"type": "STRING", "description": "ชุด 1: ตัวเลข 2-4 หลัก ใช้ ? แทนหลักที่ไม่ชัด"},
                             "set3": {"type": "STRING", "description": "ชุด 3: 'ก3' หรือ 'ก6' เท่านั้น หรือว่างถ้าไม่มี"},
                             "set2": {"type": "STRING", "description": "ชุด 2: ตัวเลขเดี่ยว หรือ NxN"},
-                            "raw_text": {"type": "STRING", "description": "ข้อความดิบที่เห็น"}
+                            "raw_text": {"type": "STRING", "description": "ข้อความดิบที่เห็น"},
+                            "confidence": {"type": "STRING", "description": "'high' หากมั่นใจ 100%, 'low' หากไม่แน่ใจ"},
+                            "uncertain_note": {"type": "STRING", "description": "คำอธิบายสั้นๆ ถ้า confidence=low เช่น 'ตัวเลขเบลอ อาจเป็น 3 หรือ 8'"}
                         },
-                        "required": ["set1", "set3", "set2"]
+                        "required": ["set1", "set3", "set2", "confidence", "uncertain_note"]
                     }
                 },
                 "bottom": {
@@ -161,12 +168,14 @@ RESPONSE_SCHEMA = {
                     "items": {
                         "type": "OBJECT",
                         "properties": {
-                            "set1": {"type": "STRING", "description": "ชุด 1: ตัวเลข 2-4 หลัก"},
+                            "set1": {"type": "STRING", "description": "ชุด 1: ตัวเลข 2-4 หลัก ใช้ ? แทนหลักที่ไม่ชัด"},
                             "set3": {"type": "STRING", "description": "ชุด 3: 'ก3' หรือ 'ก6' เท่านั้น หรือว่างถ้าไม่มี"},
                             "set2": {"type": "STRING", "description": "ชุด 2: ตัวเลขเดี่ยว หรือ NxN"},
-                            "raw_text": {"type": "STRING", "description": "ข้อความดิบที่เห็น"}
+                            "raw_text": {"type": "STRING", "description": "ข้อความดิบที่เห็น"},
+                            "confidence": {"type": "STRING", "description": "'high' หากมั่นใจ 100%, 'low' หากไม่แน่ใจ"},
+                            "uncertain_note": {"type": "STRING", "description": "คำอธิบายสั้นๆ ถ้า confidence=low เช่น 'ตัวเลขเบลอ อาจเป็น 3 หรือ 8'"}
                         },
-                        "required": ["set1", "set3", "set2"]
+                        "required": ["set1", "set3", "set2", "confidence", "uncertain_note"]
                     }
                 },
                 "top_bottom": {
@@ -175,19 +184,21 @@ RESPONSE_SCHEMA = {
                     "items": {
                         "type": "OBJECT",
                         "properties": {
-                            "set1": {"type": "STRING", "description": "ชุด 1: ตัวเลข 2-4 หลัก"},
+                            "set1": {"type": "STRING", "description": "ชุด 1: ตัวเลข 2-4 หลัก ใช้ ? แทนหลักที่ไม่ชัด"},
                             "set3": {"type": "STRING", "description": "ชุด 3: 'ก3' หรือ 'ก6' เท่านั้น หรือว่างถ้าไม่มี"},
                             "set2": {"type": "STRING", "description": "ชุด 2: ตัวเลขเดี่ยว หรือ NxN"},
-                            "raw_text": {"type": "STRING", "description": "ข้อความดิบที่เห็น"}
+                            "raw_text": {"type": "STRING", "description": "ข้อความดิบที่เห็น"},
+                            "confidence": {"type": "STRING", "description": "'high' หากมั่นใจ 100%, 'low' หากไม่แน่ใจ"},
+                            "uncertain_note": {"type": "STRING", "description": "คำอธิบายสั้นๆ ถ้า confidence=low เช่น 'ตัวเลขเบลอ อาจเป็น 3 หรือ 8'"}
                         },
-                        "required": ["set1", "set3", "set2"]
+                        "required": ["set1", "set3", "set2", "confidence", "uncertain_note"]
                     }
                 }
             },
             "required": ["top", "bottom", "top_bottom"]
         }
     },
-    "required": ["header", "columns"]
+    "required": ["header", "unclear_notes", "columns"]
 }
 
 MODELS_CONFIG = [
