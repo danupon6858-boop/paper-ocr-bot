@@ -206,37 +206,110 @@ def format_clean_editable_text(sheet_num: str, columns: dict) -> str:
         
     return "\n".join(lines).strip()
 
-def parse_entry_line(line: str) -> Optional[dict]:
+COL_MAP = {
+    "top_bottom": [
+        "บนล่าง", "บ-ล", "บล", "บ/ล", "บ.ล.", "บ.ล", "บน-ล่าง", "บน/ล่าง", "บนล", "both", "bl",
+        "หมวดบนล่าง", "หมวด บ-ล", "หมวด บล", "หมวด บนล่าง"
+    ],
+    "top": [
+        "บน", "บ", "top", "t", "หมวดบน", "หมวด บ", "หมวด บน"
+    ],
+    "bottom": [
+        "ล่าง", "ล", "ล่", "bot", "bottom", "l", "หมวดล่าง", "หมวด ล", "หมวด ล่าง"
+    ]
+}
+
+def detect_column_header(line: str) -> Optional[str]:
+    clean = line.replace("[", "").replace("]", "").replace(":", "").replace("หมวด", "").strip().lower()
+    clean_raw = line.replace("[", "").replace("]", "").replace(":", "").strip()
+    
+    # Check top_bottom first because it contains both 'บ' and 'ล'
+    for alias in COL_MAP["top_bottom"]:
+        a_clean = alias.replace("หมวด", "").strip().lower()
+        if clean == a_clean or clean_raw == alias:
+            return "top_bottom"
+            
+    for alias in COL_MAP["top"]:
+        a_clean = alias.replace("หมวด", "").strip().lower()
+        if clean == a_clean or clean_raw == alias:
+            return "top"
+            
+    for alias in COL_MAP["bottom"]:
+        a_clean = alias.replace("หมวด", "").strip().lower()
+        if clean == a_clean or clean_raw == alias:
+            return "bottom"
+            
+    return None
+
+def parse_entries_from_line(line: str) -> list:
+    """Intelligently tokenizes and extracts 1 or more entries from a line.
+    
+    Identifies set1 (2-4 digits), set3 ('ก3' or 'ก6'), and set2 (amount or NxN).
+    Supports all common separators (=, -, :, /, whitespace, comma, semicolon).
+    """
     line = line.strip()
     if not line:
-        return None
-    parts = line.split("=", 1)
-    if len(parts) == 2:
-        s1 = parts[0].strip()
-        right = parts[1].strip()
-    else:
-        m = re.match(r"^(\d+)\s+(.+)$", line)
-        if m:
-            s1 = m.group(1).strip()
-            right = m.group(2).strip()
-        else:
-            if re.match(r"^\d{2,4}$", line):
-                return {"set1": line, "set2": "", "set3": "", "raw_text": line}
-            return None
+        return []
+
+    # Normalize NxN formats (e.g. 120 X 120 -> 120x120)
+    normalized = re.sub(r'(\d+)\s*[xX]\s*(\d+)', r'\1x\2', line)
+    # Split stuck special codes (e.g. 401ก350 -> 401 ก3 50)
+    normalized = re.sub(r'(\d+)(ก[36])', r'\1 \2 ', normalized)
+    normalized = re.sub(r'(ก[36])(\d+)', r' \1 \2', normalized)
+
+    sub_chunks = re.split(r'[,;]+', normalized)
+    entries = []
+    
+    for chunk in sub_chunks:
+        chunk = chunk.strip()
+        if not chunk:
+            continue
             
-    s3 = ""
-    s2 = right
-    m_s3 = re.search(r"(ก3|ก6)", right)
-    if m_s3:
-        s3 = m_s3.group(1)
-        s2 = right.replace(s3, "").strip()
-        
-    s2 = s2.replace("X", "x").replace(" ", "")
-    s3_part = f"{s3} " if s3 else ""
-    raw = f"{s1} = {s3_part}{s2}".strip()
-    return {"set1": s1, "set2": s2, "set3": s3, "raw_text": raw}
+        # Extract meaningful tokens: special codes, NxN, or numeric blocks
+        tokens = re.findall(r'(ก[36]|\d+x\d+|\d+)', chunk)
+        if not tokens:
+            continue
+            
+        i = 0
+        while i < len(tokens):
+            tok = tokens[i]
+            # set1 must be 2-4 digits
+            if re.fullmatch(r'\d{2,4}', tok):
+                s1 = tok
+                s3 = ""
+                s2 = ""
+                i += 1
+                
+                if i < len(tokens):
+                    next_tok = tokens[i]
+                    if next_tok in ("ก3", "ก6"):
+                        s3 = next_tok
+                        i += 1
+                        if i < len(tokens) and re.fullmatch(r'\d+', tokens[i]):
+                            s2 = tokens[i]
+                            i += 1
+                    elif re.fullmatch(r'\d+x\d+', next_tok):
+                        s2 = next_tok
+                        i += 1
+                    elif re.fullmatch(r'\d+', next_tok):
+                        s2 = next_tok
+                        i += 1
+                
+                s3_part = f"{s3} " if s3 else ""
+                raw = f"{s1} = {s3_part}{s2}".strip() if (s2 or s3) else s1
+                entries.append({"set1": s1, "set2": s2, "set3": s3, "raw_text": raw})
+            else:
+                i += 1
+                
+    return entries
+
+def parse_entry_line(line: str) -> Optional[dict]:
+    """Parses a single entry line (returns the first valid entry found)."""
+    entries = parse_entries_from_line(line)
+    return entries[0] if entries else None
 
 def parse_sheet_text(text: str) -> Optional[dict]:
+    """Parses an entire sheet text block, supporting column abbreviations and multiple formats."""
     lines = [l.strip() for l in text.strip().split("\n") if l.strip()]
     if not lines:
         return None
@@ -247,33 +320,29 @@ def parse_sheet_text(text: str) -> Optional[dict]:
     has_entries = False
     
     for line in lines:
-        m_sheet = re.search(r"ใบที่(?:\s*[:\-]?\s*)([A-Za-z0-9\-_]+)", line)
+        # Flexible sheet header matching (e.g. ใบที่ 1, ใบ A-1, แผ่นที่ 2, No. 5, #3, เลขที่ 10)
+        m_sheet = re.search(r'(?:ใบที่|ใบ|แผ่นที่|แผ่น|no\.?|#|เลขที่)\s*[:\-]?\s*([A-Za-z0-9\-_/]+)', line, re.IGNORECASE)
         if m_sheet:
             found_id = m_sheet.group(1).strip()
             if not sheet_id or (found_id and "-" in found_id):
                 sheet_id = found_id
             continue
             
-        line_clean = line.replace("[", "").replace("]", "").replace(":", "").strip()
-        if line_clean in ["บนล่าง", "หมวดบนล่าง", "หมวด บนล่าง"]:
-            current_col = "top_bottom"
-            continue
-        elif line_clean in ["บน", "หมวดบน", "หมวด บน"]:
-            current_col = "top"
-            continue
-        elif line_clean in ["ล่าง", "หมวดล่าง", "หมวด ล่าง"]:
-            current_col = "bottom"
+        detected_col = detect_column_header(line)
+        if detected_col:
+            current_col = detected_col
             continue
             
-        entry = parse_entry_line(line)
-        if entry:
-            columns[current_col].append(entry)
+        entries = parse_entries_from_line(line)
+        if entries:
+            columns[current_col].extend(entries)
             has_entries = True
             
     if not has_entries:
         return None
         
     return {"sheet_id": sheet_id, "columns": columns}
+
 
 def handle_delete_command(text: str, user_id: str, reply_token: str) -> bool:
     m = re.match(r"^ลบ\s+(\d+)(?:[=\s].*)?$", text.strip())
