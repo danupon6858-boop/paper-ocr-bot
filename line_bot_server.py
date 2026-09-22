@@ -1509,7 +1509,13 @@ def render_html_dashboard(period_id: Optional[int] = None, scope: str = "period"
         sheet_val = r["sheet_id"] or "-"
         worker_val = f"{r['employee_name'] or 'พนักงาน'} ({r['worker_code'] or 'A'})"
         time_val = str(r["created_at"] or "")[:16]
-        img_val = f"/{r['image_path']}" if r["image_path"] else ""
+        raw_img = str(r["image_path"] or "").strip()
+        if raw_img.startswith("uploads/"):
+            img_val = f"/{raw_img}"
+        elif raw_img.startswith("/uploads/"):
+            img_val = raw_img
+        else:
+            img_val = ""
         box_val = r["box_2d"] or ""
         note_val = r["uncertain_note"] or ""
         
@@ -1546,7 +1552,7 @@ def render_html_dashboard(period_id: Optional[int] = None, scope: str = "period"
             </tr>
             """
     else:
-        table_rows_html = f"<tr><td colspan='4' style='text-align:center; padding:40px; color:#94a3b8;'>ยังไม่มีข้อมูลใน {p_name} ส่งรูปถ่ายผ่าน LINE เข้ามาได้เลยครับ</td></tr>"
+        table_rows_html = '<tr><td colspan="4" style="text-align:center; color:#94a3b8; padding:30px;">ยังไม่มีข้อมูลในงวดนี้</td></tr>'
 
     # Recent sheet photos HTML
     sheet_photos_html = ""
@@ -1554,15 +1560,24 @@ def render_html_dashboard(period_id: Optional[int] = None, scope: str = "period"
         badges = []
         for s in recent_sheets:
             sid = s["sheet_id"]
-            img_url = f"/{s['image_path']}"
+            raw_simg = str(s["image_path"] or "").strip()
+            if raw_simg.startswith("uploads/"):
+                img_url = f"/{raw_simg}"
+            elif raw_simg.startswith("/uploads/"):
+                img_url = raw_simg
+            else:
+                img_url = ""
+            if not img_url:
+                continue
             w_code = s["worker_code"] or "A"
             badges.append(f'<a href="{img_url}" target="_blank" class="sheet-photo-badge">📷 {sid} ({w_code})</a>')
-        sheet_photos_html = f"""
-        <div class="sheet-photos-bar">
-            <span style="font-size:13px; font-weight:700; color:#475569;">🖼️ รูปกระดาษจริง ({len(recent_sheets)} ใบล่าสุด):</span>
-            <div class="sheet-photos-list">{' '.join(badges)}</div>
-        </div>
-        """
+        if badges:
+            sheet_photos_html = f"""
+            <div class="sheet-photos-bar">
+                <span style="font-size:13px; font-weight:700; color:#475569;">🖼️ รูปกระดาษจริง ({len(badges)} ใบล่าสุด):</span>
+                <div class="sheet-photos-list">{' '.join(badges)}</div>
+            </div>
+            """
 
     # Data for Tab 2 (Set 1 Insights)
     is_all_time = (scope == "all")
@@ -2275,17 +2290,11 @@ def render_html_dashboard(period_id: Optional[int] = None, scope: str = "period"
             var box = el.getAttribute('data-box') || '';
             var note = el.getAttribute('data-note') || '';
 
-            if (!img) {{
-                alert('ใบนี้ไม่มีไฟล์รูปถ่ายต้นฉบับในระบบครับ');
-                return;
-            }}
-
             document.getElementById('auditNumTag').innerText = num;
             document.getElementById('auditSheetId').innerText = sheet;
             document.getElementById('auditWorker').innerText = worker;
             document.getElementById('auditCat').innerText = cat;
             document.getElementById('auditTime').innerText = time;
-            document.getElementById('auditFullLink').href = img;
 
             var braceBox = document.getElementById('auditBraceBanner');
             if (note && note.indexOf('ปีกกา') !== -1) {{
@@ -2307,9 +2316,35 @@ def render_html_dashboard(period_id: Optional[int] = None, scope: str = "period"
             document.body.style.overflow = 'hidden';
 
             var imgEl = document.getElementById('auditImg');
-            imgEl.src = img;
-            if (imgEl.complete && imgEl.naturalWidth > 0) {{
-                onAuditImageLoaded();
+            var placeholderEl = document.getElementById('auditEmptyPlaceholder');
+            var zoomContainer = document.getElementById('auditZoomContainer');
+            var fullLink = document.getElementById('auditFullLink');
+            var zoomIndicator = document.getElementById('auditZoomIndicator');
+
+            imgEl.onerror = function() {{
+                zoomContainer.style.display = 'none';
+                placeholderEl.style.display = 'block';
+                if (fullLink) fullLink.style.display = 'none';
+                if (zoomIndicator) zoomIndicator.innerText = 'ไม่มีไฟล์ภาพ';
+            }};
+
+            if (!img || img === '#' || img.trim() === '') {{
+                zoomContainer.style.display = 'none';
+                placeholderEl.style.display = 'block';
+                if (fullLink) fullLink.style.display = 'none';
+                if (zoomIndicator) zoomIndicator.innerText = 'ไม่มีไฟล์ภาพ';
+            }} else {{
+                zoomContainer.style.display = 'block';
+                placeholderEl.style.display = 'none';
+                if (fullLink) {{
+                    fullLink.style.display = 'inline-flex';
+                    fullLink.href = img;
+                }}
+                if (zoomIndicator) zoomIndicator.innerText = 'ซูม ' + Math.round(currentAuditScale * 100) + '%';
+                imgEl.src = img;
+                if (imgEl.complete && imgEl.naturalWidth > 0) {{
+                    onAuditImageLoaded();
+                }}
             }}
         }}
 
@@ -2317,6 +2352,13 @@ def render_html_dashboard(period_id: Optional[int] = None, scope: str = "period"
             var vp = document.getElementById('auditViewport');
             var ring = document.getElementById('auditSpotlightRing');
             var imgEl = document.getElementById('auditImg');
+            var zoomContainer = document.getElementById('auditZoomContainer');
+            var placeholderEl = document.getElementById('auditEmptyPlaceholder');
+            var fullLink = document.getElementById('auditFullLink');
+
+            zoomContainer.style.display = 'block';
+            placeholderEl.style.display = 'none';
+            if (fullLink) fullLink.style.display = 'inline-flex';
             
             if (auditBoxCoords && auditBoxCoords.length === 4) {{
                 var ymin = auditBoxCoords[0];
@@ -2470,6 +2512,13 @@ def render_html_dashboard(period_id: Optional[int] = None, scope: str = "period"
                         <div id="auditZoomContainer" class="audit-zoom-container">
                             <img id="auditImg" src="" alt="Sheet Photo" class="audit-sheet-img" onload="onAuditImageLoaded()">
                             <div id="auditSpotlightRing" class="spotlight-ring" style="display:none;"></div>
+                        </div>
+                        <div id="auditEmptyPlaceholder" style="display:none; padding:45px 16px; text-align:center;">
+                            <div style="font-size:42px; margin-bottom:12px;">📷</div>
+                            <div style="font-size:16px; font-weight:700; color:#f1f5f9; margin-bottom:6px;">ไม่มีไฟล์ภาพถ่ายต้นฉบับในเซิร์ฟเวอร์</div>
+                            <div style="font-size:12px; color:#94a3b8; max-width:380px; margin:0 auto; line-height:1.6;">
+                                รายการนี้อาจเป็นข้อมูลทดสอบระบบ (TEST) หรือมาจากการพิมพ์ข้อความส่งเข้ามาทาง LINE โดยตรง จึงไม่มีไฟล์ภาพถ่ายจริงในระบบครับ
+                            </div>
                         </div>
                     </div>
                     <div style="font-size:11px; color:#64748b; margin-top:6px; text-align:center;">

@@ -79,7 +79,7 @@ SYSTEM_PROMPT = """คุณคือ AI ผู้เชี่ยวชาญร
   * "confidence": "high" (อ่านชัดเจนมั่นใจ) หรือ "low" (ลายมือหวัดมาก, หมึกจาง, หรือก้ำกึ่งระหว่างตัวเลขสองตัว เช่น 3 หรือ 8)
   * "uncertain_note": หากเป็น "low" ให้อธิบายสั้นๆ เช่น "เลขท้ายอาจเป็น 4 หรือ 9", "หมึกจาง", "เลข 3 หรือ 8" หรือถ้ามาจากปีกกาให้ใส่ "ปีกการ่วมกัน N/M" (ถ้ามั่นใจและไม่มีปีกกาให้ใส่ "")
   * หากหลักใดอ่านไม่ออกจริงๆ ให้ใช้เครื่องหมาย '?' แทนหลักนั้นได้ เช่น "40?"
-  * "box_2d": [ymin, xmin, ymax, xmax] พิกัดกรอบล้อมรอบตัวเลขแถวนั้น (สเกล normalized 0 ถึง 1000 เทียบกับความสูง-ความกว้างของภาพ) เช่น [180, 150, 240, 500]
+  * "box_2d": [ymin, xmin, ymax, xmax] พิกัดกรอบล้อมรอบตัวเลข (0-1000) ระบุเฉพาะรายการที่มีความไม่ชัดเจน (confidence='low') หรือมาจากปีกกา หากอ่านชัดเจนมั่นใจ high สามารถใส่ [] หรือละเว้นได้เพื่อความรวดเร็วสูงสุด
 - "unclear_notes": สรุปจุดที่พบลายมือเขียนแต่เบลอจนอ่านไม่ออก หรือรายการที่มีความไม่ชัดเจน เป็น Array ของข้อความ เช่น ["พบลายมือหมึกจางแถวล่างแต่อ่านไม่ออก", "เลข 404 ไม่ชัด"]
 
 =======================================================
@@ -117,7 +117,7 @@ SYSTEM_PROMPT = """คุณคือ AI ผู้เชี่ยวชาญร
         "raw_text": "401 = 120x120",
         "confidence": "high",
         "uncertain_note": "",
-        "box_2d": [180, 150, 230, 480]
+        "box_2d": []
       }
     ],
     "bottom": [
@@ -128,7 +128,7 @@ SYSTEM_PROMPT = """คุณคือ AI ผู้เชี่ยวชาญร
         "raw_text": "12 = 50",
         "confidence": "high",
         "uncertain_note": "",
-        "box_2d": [550, 150, 600, 400]
+        "box_2d": []
       }
     ],
     "top_bottom": []
@@ -171,11 +171,11 @@ RESPONSE_SCHEMA = {
                             "uncertain_note": {"type": "STRING", "description": "คำอธิบายสั้นๆ ถ้า confidence=low หรือ 'ปีกการ่วมกัน N/M'"},
                             "box_2d": {
                                 "type": "ARRAY",
-                                "description": "พิกัด [ymin, xmin, ymax, xmax] ในสเกล 0-1000 เทียบกับขนาดภาพ",
+                                "description": "พิกัด [ymin, xmin, ymax, xmax] ในสเกล 0-1000 เทียบกับขนาดภาพ (ระบุเฉพาะจุดที่ไม่ชัดเจน confidence='low' หรือมีปีกกา)",
                                 "items": {"type": "INTEGER"}
                             }
                         },
-                        "required": ["set1", "set3", "set2", "confidence", "uncertain_note", "box_2d"]
+                        "required": ["set1", "set3", "set2", "confidence", "uncertain_note"]
                     }
                 },
                 "bottom": {
@@ -192,11 +192,11 @@ RESPONSE_SCHEMA = {
                             "uncertain_note": {"type": "STRING", "description": "คำอธิบายสั้นๆ ถ้า confidence=low หรือ 'ปีกการ่วมกัน N/M'"},
                             "box_2d": {
                                 "type": "ARRAY",
-                                "description": "พิกัด [ymin, xmin, ymax, xmax] ในสเกล 0-1000 เทียบกับขนาดภาพ",
+                                "description": "พิกัด [ymin, xmin, ymax, xmax] ในสเกล 0-1000 เทียบกับขนาดภาพ (ระบุเฉพาะจุดที่ไม่ชัดเจน confidence='low' หรือมีปีกกา)",
                                 "items": {"type": "INTEGER"}
                             }
                         },
-                        "required": ["set1", "set3", "set2", "confidence", "uncertain_note", "box_2d"]
+                        "required": ["set1", "set3", "set2", "confidence", "uncertain_note"]
                     }
                 },
                 "top_bottom": {
@@ -213,11 +213,11 @@ RESPONSE_SCHEMA = {
                             "uncertain_note": {"type": "STRING", "description": "คำอธิบายสั้นๆ ถ้า confidence=low หรือ 'ปีกการ่วมกัน N/M'"},
                             "box_2d": {
                                 "type": "ARRAY",
-                                "description": "พิกัด [ymin, xmin, ymax, xmax] ในสเกล 0-1000 เทียบกับขนาดภาพ",
+                                "description": "พิกัด [ymin, xmin, ymax, xmax] ในสเกล 0-1000 เทียบกับขนาดภาพ (ระบุเฉพาะจุดที่ไม่ชัดเจน confidence='low' หรือมีปีกกา)",
                                 "items": {"type": "INTEGER"}
                             }
                         },
-                        "required": ["set1", "set3", "set2", "confidence", "uncertain_note", "box_2d"]
+                        "required": ["set1", "set3", "set2", "confidence", "uncertain_note"]
                     }
                 }
             },
@@ -229,14 +229,11 @@ RESPONSE_SCHEMA = {
 
 MODELS_CONFIG = [
     ("v1beta", "gemini-flash-lite-latest", 2),
-    ("v1beta", "gemini-3.5-flash-lite", 1),
-    ("v1beta", "gemini-3.5-flash", 1),
-    ("v1beta", "gemini-flash-latest", 1),
-    ("v1beta", "gemini-pro-latest", 1),
-    ("v1beta", "gemini-3.8-flash", 1)
+    ("v1beta", "gemini-flash-latest", 2),
+    ("v1beta", "gemini-1.5-flash", 1)
 ]
-GLOBAL_TIMEOUT_SECONDS = 50
-PER_REQUEST_TIMEOUT = 20
+GLOBAL_TIMEOUT_SECONDS = 90
+PER_REQUEST_TIMEOUT = 35
 
 def clean_and_parse_json(text: str) -> dict:
     text = text.strip()
@@ -307,6 +304,8 @@ def auto_repair_extracted_data(ocr_result: dict) -> dict:
             if confidence not in ("high", "low"):
                 confidence = "high"
             uncertain_note = str(itm.get("uncertain_note") or "").strip()
+            raw_box = itm.get("box_2d")
+            box_2d = [int(v) for v in raw_box if isinstance(v, (int, float))] if isinstance(raw_box, list) else []
             
             # Skip completely empty entries
             if not s1 and not s2:
@@ -344,7 +343,8 @@ def auto_repair_extracted_data(ocr_result: dict) -> dict:
                         "set3": curr_s3,
                         "raw_text": f"{curr_s1} = {first_s2}",
                         "confidence": confidence,
-                        "uncertain_note": uncertain_note
+                        "uncertain_note": uncertain_note,
+                        "box_2d": box_2d
                     })
                     curr_s1 = next_s1
                     curr_s2 = next_s2
@@ -381,7 +381,8 @@ def auto_repair_extracted_data(ocr_result: dict) -> dict:
                         "set3": curr_s3,
                         "raw_text": raw or f"{curr_s1} = {final_s2}",
                         "confidence": confidence,
-                        "uncertain_note": uncertain_note
+                        "uncertain_note": uncertain_note,
+                        "box_2d": box_2d
                     })
                     break
                     

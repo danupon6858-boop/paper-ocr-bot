@@ -83,10 +83,21 @@ def crop_snippet_from_bytes(image_bytes: bytes, box_2d: List[int], output_path: 
         except Exception as e:
             print(f"[Image Cropper] PIL crop error: {e}")
 
-    # Fallback to source file with sips if available
-    if source_path and os.path.exists(source_path):
+    # Fallback to sips if on macOS
+    temp_src = source_path if (source_path and os.path.exists(source_path)) else None
+    temp_created = False
+    if not temp_src and image_bytes:
+        temp_src = output_path + ".tmp.jpg"
         try:
-            w, h = get_image_dimensions(image_bytes, source_path)
+            with open(temp_src, "wb") as f:
+                f.write(image_bytes)
+            temp_created = True
+        except Exception:
+            temp_src = None
+
+    if temp_src and os.path.exists(temp_src):
+        try:
+            w, h = get_image_dimensions(image_bytes, temp_src)
             left = int(xmin * w / 1000.0)
             top = int(ymin * h / 1000.0)
             right = int(xmax * w / 1000.0)
@@ -98,7 +109,7 @@ def crop_snippet_from_bytes(image_bytes: bytes, box_2d: List[int], output_path: 
             offset_y = max(0, top - 15)
 
             # Copy source to output first
-            with open(source_path, "rb") as sf, open(output_path, "wb") as df:
+            with open(temp_src, "rb") as sf, open(output_path, "wb") as df:
                 df.write(sf.read())
 
             subprocess.run([
@@ -107,8 +118,12 @@ def crop_snippet_from_bytes(image_bytes: bytes, box_2d: List[int], output_path: 
                 "--cropOffsetOffsetYX", str(offset_y), str(offset_x),
                 output_path
             ], capture_output=True, timeout=5)
+            if temp_created and os.path.exists(temp_src):
+                os.remove(temp_src)
             return True
         except Exception as e:
             print(f"[Image Cropper] sips crop error: {e}")
+            if temp_created and os.path.exists(temp_src):
+                os.remove(temp_src)
 
     return False
