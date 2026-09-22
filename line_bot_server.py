@@ -10,12 +10,14 @@ import re
 import os
 import threading
 import time
+import html as html_lib
 from typing import List, Dict, Optional, Tuple
 from config import LINE_CHANNEL_SECRET, LINE_CHANNEL_ACCESS_TOKEN, OWNER_USER_ID
 import ocr_engine
 from validator import OCRValidator
 import database
 import query_service
+import image_cropper
 
 PORT = int(os.environ.get("PORT", 8080))
 BASE_URL = os.environ.get("RENDER_EXTERNAL_URL", "https://paper-ocr-bot.onrender.com")
@@ -159,7 +161,9 @@ def build_flex_ocr_card(
     uncertain_count: int = 0,
     unclear_block: str = "",
     pending_count: int = 1,
-    batch_tag: str = ""
+    batch_tag: str = "",
+    snippet_url: str = "",
+    snippet_label: str = ""
 ) -> dict:
     """Builds a rich LINE Flex Message card with permanent [ยืนยัน] and [ยกเลิก] buttons inside the card bubble."""
     display_text = clean_text
@@ -207,6 +211,35 @@ def build_flex_ocr_card(
         }
     ]
 
+    if snippet_url:
+        label_text = f"🔍 ลายมือจริงที่ AI ไม่มั่นใจ ({snippet_label}):" if snippet_label else "🔍 ภาพลายมือจริงจุดที่ AI ไม่มั่นใจ:"
+        body_contents.append({
+            "type": "box",
+            "layout": "vertical",
+            "backgroundColor": "#fffbeb",
+            "cornerRadius": "8px",
+            "paddingAll": "8px",
+            "margin": "md",
+            "contents": [
+                {
+                    "type": "text",
+                    "text": label_text,
+                    "size": "xs",
+                    "weight": "bold",
+                    "color": "#b45309",
+                    "wrap": True
+                },
+                {
+                    "type": "image",
+                    "url": snippet_url,
+                    "size": "full",
+                    "aspectRatio": "20:9",
+                    "aspectMode": "fit",
+                    "margin": "sm"
+                }
+            ]
+        })
+
     if unclear_block.strip():
         body_contents.append({
             "type": "text",
@@ -245,6 +278,26 @@ def build_flex_ocr_card(
         "margin": "sm"
     })
 
+    header_title_items = [
+        {
+            "type": "text",
+            "text": f"📋 ใบที่: {sheet_id}",
+            "weight": "bold",
+            "color": "#38bdf8",
+            "size": "md",
+            "flex": 3
+        }
+    ]
+    if batch_tag:
+        header_title_items.append({
+            "type": "text",
+            "text": str(batch_tag),
+            "size": "xs",
+            "color": "#94a3b8",
+            "align": "end",
+            "flex": 2
+        })
+
     bubble = {
         "type": "bubble",
         "size": "mega",
@@ -257,24 +310,7 @@ def build_flex_ocr_card(
                 {
                     "type": "box",
                     "layout": "horizontal",
-                    "contents": [
-                        {
-                            "type": "text",
-                            "text": f"📋 ใบที่: {sheet_id}",
-                            "weight": "bold",
-                            "color": "#38bdf8",
-                            "size": "md",
-                            "flex": 3
-                        },
-                        {
-                            "type": "text",
-                            "text": batch_tag if batch_tag else "",
-                            "size": "xs",
-                            "color": "#94a3b8",
-                            "align": "end",
-                            "flex": 2
-                        }
-                    ]
+                    "contents": header_title_items
                 },
                 {
                     "type": "text",
@@ -392,6 +428,58 @@ def get_line_image_content(message_id: str) -> bytes:
     except urllib.error.HTTPError as e:
         err_b = e.read().decode('utf-8', errors='ignore') if hasattr(e, 'read') else ''
         raise RuntimeError(f"LINE Content API error ({e.code} {e.reason}): {err_b}")
+
+def normalize_brace_groupings(columns: dict) -> dict:
+    """
+    Scans columns for contiguous runs of items that indicate bracket/brace sharing
+    (e.g., 'ปีกการ่วมกับแถวอื่น', 'ใช้ปีกการ่วมกับแถวบน', 'ปีกกา') and normalizes their
+    uncertain_note to 'ปีกการ่วมกัน [i]/[total]' (e.g. 'ปีกการ่วมกัน 1/10', 'ปีกการ่วมกัน 2/10').
+    """
+    if not isinstance(columns, dict):
+        return columns
+    keywords = ["ปีกกา", "วงเล็บ", "ร่วมกัน", "แถวบน", "แถวล่าง", "แถวอื่น"]
+    for col_key in ["top", "bottom", "top_bottom"]:
+        items = columns.get(col_key, [])
+        if not isinstance(items, list) or len(items) < 2:
+            continue
+        n = len(items)
+        i = 0
+        while i < n:
+            note = str(items[i].get("uncertain_note") or "").strip()
+            is_brace = any(k in note for k in keywords)
+            
+            if is_brace:
+                group_start = i
+                # Check backward if previous item has the same set2 and either no note or brace note
+                if i > 0:
+                    prev_s2 = str(items[i-1].get("set2") or "").strip()
+                    curr_s2 = str(items[i].get("set2") or "").strip()
+                    prev_note = str(items[i-1].get("uncertain_note") or "").strip()
+                    if prev_s2 == curr_s2 and (not prev_note or any(k in prev_note for k in keywords)):
+                        if not ("/" in prev_note and "ปีกกา" in prev_note):
+                            group_start = i - 1
+                
+                curr_s2 = str(items[group_start].get("set2") or "").strip()
+                group_end = group_start
+                while group_end + 1 < n:
+                    next_s2 = str(items[group_end + 1].get("set2") or "").strip()
+                    next_note = str(items[group_end + 1].get("uncertain_note") or "").strip()
+                    if next_s2 == curr_s2 and (any(k in next_note for k in keywords) or any(k in str(items[group_end].get("uncertain_note") or "") for k in keywords)):
+                        group_end += 1
+                    else:
+                        break
+                
+                group_len = group_end - group_start + 1
+                if group_len > 1:
+                    for idx, item_idx in enumerate(range(group_start, group_end + 1), start=1):
+                        orig_note = items[item_idx].get("uncertain_note", "")
+                        other_notes = [part for part in orig_note.split() if not any(k in part for k in keywords)]
+                        other_text = f" ({' '.join(other_notes)})" if other_notes else ""
+                        items[item_idx]["uncertain_note"] = f"ปีกการ่วมกัน {idx}/{group_len}{other_text}"
+                i = group_end + 1
+            else:
+                i += 1
+    return columns
 
 def format_clean_editable_text(sheet_num: str, columns: dict) -> str:
     lines = [f"ใบที่ {sheet_num}"]
@@ -780,7 +868,10 @@ def handle_image_message(message_id: str, reply_token: str, user_id: str, user_i
             return
 
         print(f"Validating rules #{job_idx}...")
+        normalize_brace_groupings(ocr_result.get("columns", {}))
         val_result = OCRValidator.validate_document(ocr_result)
+        valid_cols = val_result.get("validated_columns", {})
+        normalize_brace_groupings(valid_cols)
         
         header = ocr_result.get("header") if isinstance(ocr_result.get("header"), dict) else {}
         ocr_result["header"] = header
@@ -790,10 +881,15 @@ def handle_image_message(message_id: str, reply_token: str, user_id: str, user_i
         user_lock = get_user_lock(user_id)
         with user_lock:
             if raw_sheet_id and raw_sheet_id.lower() not in ["none", "null", "n/a", ""]:
-                formatted_sheet_id = f"{worker_code}-{raw_sheet_id}" if not raw_sheet_id.startswith(f"{worker_code}-") else raw_sheet_id
+                candidate_sheet_id = f"{worker_code}-{raw_sheet_id}" if not raw_sheet_id.startswith(f"{worker_code}-") else raw_sheet_id
             else:
+                candidate_sheet_id = ""
+
+            if not candidate_sheet_id or database.is_sheet_id_taken(active_p["id"], candidate_sheet_id):
                 formatted_sheet_id = database.get_next_available_sheet_id(active_p["id"], worker_code)
                 raw_sheet_id = formatted_sheet_id.split("-", 1)[1] if "-" in formatted_sheet_id else formatted_sheet_id
+            else:
+                formatted_sheet_id = candidate_sheet_id
 
             ocr_result["header"]["sheet_id"] = formatted_sheet_id
             ocr_result["header"]["customer_name"] = emp_name
@@ -806,7 +902,7 @@ def handle_image_message(message_id: str, reply_token: str, user_id: str, user_i
 
             # Check Duplicate Sheet
             is_dup, dup_msg = database.check_duplicate_sheet(
-                active_p["id"], formatted_sheet_id, val_result.get("validated_columns", {})
+                active_p["id"], formatted_sheet_id, valid_cols
             )
             if is_dup:
                 dup_reply = (
@@ -818,13 +914,45 @@ def handle_image_message(message_id: str, reply_token: str, user_id: str, user_i
                 deliver_message(user_id, reply_token, dup_reply)
                 return
 
+            # Identify first uncertain item with box_2d to crop snippet for LINE chat
+            snippet_url = ""
+            snippet_label = ""
+            uncertain_item = None
+            for col_k in ["top", "bottom", "top_bottom"]:
+                for itm in valid_cols.get(col_k, []):
+                    s1 = str(itm.get("set1") or "")
+                    s2 = str(itm.get("set2") or "")
+                    conf = str(itm.get("confidence") or "").lower()
+                    u_note = str(itm.get("uncertain_note") or "")
+                    box = itm.get("box_2d")
+                    is_doubtful = (conf == "low" or "?" in s1 or "?" in s2 or (u_note and not u_note.startswith("ปีกการ่วมกัน")))
+                    if is_doubtful and box and len(box) == 4:
+                        uncertain_item = itm
+                        snippet_label = f"{s1} = {s2}"
+                        break
+                if uncertain_item:
+                    break
+
             # Create Pending Scan
             scan_id = database.create_pending_scan(
                 user_id, worker_code, emp_name, active_p["id"], formatted_sheet_id, ocr_result, val_result,
                 image_path=image_path, ocr_latency_ms=ocr_latency_ms
             )
 
-        valid_cols = val_result.get("validated_columns", {})
+            # Crop snippet for uncertain item
+            if uncertain_item and image_path:
+                try:
+                    snippets_dir = os.path.join(database.UPLOADS_DIR, str(active_p["id"]), "snippets")
+                    os.makedirs(snippets_dir, exist_ok=True)
+                    snip_filename = f"snip_{scan_id}_0.jpg"
+                    snip_file_path = os.path.join(snippets_dir, snip_filename)
+                    if image_cropper.crop_snippet_from_bytes(img_bytes, uncertain_item["box_2d"], snip_file_path, source_path=image_path):
+                        rel_path = f"{active_p['id']}/snippets/{snip_filename}"
+                        snippet_url = f"{BASE_URL}/uploads/{rel_path}"
+                        uncertain_item["snippet_path"] = rel_path
+                except Exception as ce:
+                    print(f"Error generating crop snippet: {ce}")
+
         top_items = valid_cols.get("top", [])
         bot_items = valid_cols.get("bottom", [])
         topbot_items = valid_cols.get("top_bottom", [])
@@ -859,7 +987,7 @@ def handle_image_message(message_id: str, reply_token: str, user_id: str, user_i
         all_pendings = database.get_all_pending_scans(user_id)
         pending_count = len(all_pendings)
         
-        batch_tag = f"รูปที่ {job_idx}" if job_idx > 1 else ""
+        batch_tag = f"รูปที่ {job_idx}"
 
         quick_replies = [
             ("✅ ยืนยันใบนี้", f"ยืนยัน {scan_id}"),
@@ -881,7 +1009,9 @@ def handle_image_message(message_id: str, reply_token: str, user_id: str, user_i
             uncertain_count=uncertain_count,
             unclear_block=unclear_block,
             pending_count=pending_count,
-            batch_tag=batch_tag
+            batch_tag=batch_tag,
+            snippet_url=snippet_url,
+            snippet_label=snippet_label
         )
 
         sent_ok = deliver_flex_message(user_id, reply_token, flex_card, quick_replies)
@@ -1343,10 +1473,12 @@ def render_html_dashboard(period_id: Optional[int] = None, scope: str = "period"
     conn = database.get_db_connection()
     cursor = conn.cursor()
     cursor.execute("""
-    SELECT category, set1, set3, set2, is_valid
-    FROM entries
-    WHERE period_id = ?
-    ORDER BY sheet_db_id ASC, id ASC
+    SELECT e.id, e.category, e.set1, e.set3, e.set2, e.is_valid, e.sheet_id, e.worker_code, e.employee_name,
+           e.box_2d, e.uncertain_note, s.created_at, s.image_path
+    FROM entries e
+    LEFT JOIN sheets s ON e.sheet_db_id = s.id
+    WHERE e.period_id = ?
+    ORDER BY e.sheet_db_id ASC, e.id ASC
     """, (p_id,))
     rows = cursor.fetchall()
 
@@ -1367,18 +1499,34 @@ def render_html_dashboard(period_id: Optional[int] = None, scope: str = "period"
 
     for r in rows:
         cat = r["category"]
-        s1 = r["set1"].strip()
-        s2 = r["set2"].strip()
-        s3 = r["set3"].strip()
+        s1 = str(r["set1"] or "").strip()
+        s2 = str(r["set2"] or "").strip()
+        s3 = str(r["set3"] or "").strip()
         s3_part = f"<span style='color:#d97706;font-weight:700'>{s3}</span> " if s3 else ""
-        item_html = f"<strong>{s1}</strong> = {s3_part}{s2}"
+        s3_plain = f"{s3} " if s3 else ""
+        num_plain = f"{s1} = {s3_plain}{s2}"
+        
+        sheet_val = r["sheet_id"] or "-"
+        worker_val = f"{r['employee_name'] or 'พนักงาน'} ({r['worker_code'] or 'A'})"
+        time_val = str(r["created_at"] or "")[:16]
+        img_val = f"/{r['image_path']}" if r["image_path"] else ""
+        box_val = r["box_2d"] or ""
+        note_val = r["uncertain_note"] or ""
+        
+        brace_badge = ""
+        if note_val and "ปีกกา" in note_val:
+            brace_badge = f"<span class='brace-badge'>{html_lib.escape(note_val)}</span>"
+            
+        audit_btn = f"<span class='audit-inspect-hint'>🔍 ตรวจสอบ</span>" if img_val else ""
+        
+        cell_inner = f"""<div class="audit-item" data-num="{html_lib.escape(num_plain)}" data-sheet="{html_lib.escape(sheet_val)}" data-worker="{html_lib.escape(worker_val)}" data-cat="[{html_lib.escape(cat)}]" data-time="{html_lib.escape(time_val)}" data-img="{html_lib.escape(img_val)}" data-box="{html_lib.escape(box_val)}" data-note="{html_lib.escape(note_val)}" onclick="openAuditSpotlight(this)"><span class="audit-item-text"><strong>{s1}</strong> = {s3_part}{s2} {brace_badge}</span>{audit_btn}</div>"""
         
         if cat == "บน":
-            top_items.append(item_html)
+            top_items.append(cell_inner)
         elif cat == "ล่าง":
-            bot_items.append(item_html)
+            bot_items.append(cell_inner)
         elif cat == "บนล่าง":
-            topbot_items.append(item_html)
+            topbot_items.append(cell_inner)
 
     max_len = max(len(top_items), len(bot_items), len(topbot_items), 1)
 
@@ -1392,9 +1540,9 @@ def render_html_dashboard(period_id: Optional[int] = None, scope: str = "period"
             table_rows_html += f"""
             <tr class="entry-row">
                 <td style="color:#64748b; font-weight:600; text-align:center">{row_num}</td>
-                <td class="col-val">{top_v}</td>
-                <td class="col-val">{bot_v}</td>
-                <td class="col-val">{topbot_v}</td>
+                <td class="col-val" style="padding:4px 8px;">{top_v}</td>
+                <td class="col-val" style="padding:4px 8px;">{bot_v}</td>
+                <td class="col-val" style="padding:4px 8px;">{topbot_v}</td>
             </tr>
             """
     else:
@@ -1704,6 +1852,41 @@ def render_html_dashboard(period_id: Optional[int] = None, scope: str = "period"
         .bar-fill {{ width: 100%; background: linear-gradient(180deg, #3b82f6 0%, #1d4ed8 100%); border-radius: 4px 4px 0 0; min-height: 4px; transition: height 0.3s; }}
         .bar-val {{ font-size: 10px; font-weight: 700; color: #64748b; margin-bottom: 4px; }}
         .bar-label {{ font-size: 11px; color: #94a3b8; margin-top: 6px; }}
+
+        .audit-item {{ display: flex; justify-content: space-between; align-items: center; padding: 4px 8px; border-radius: 6px; cursor: pointer; transition: all 0.15s ease-in-out; }}
+        .audit-item:hover {{ background: #eff6ff; box-shadow: 0 0 0 1px #bfdbfe; transform: translateY(-1px); }}
+        .audit-item-text {{ font-size: 14px; }}
+        .audit-inspect-hint {{ opacity: 0; font-size: 11px; color: #2563eb; background: #dbeafe; padding: 2px 6px; border-radius: 4px; font-weight: 700; transition: opacity 0.15s; white-space: nowrap; margin-left: 6px; }}
+        .audit-item:hover .audit-inspect-hint {{ opacity: 1; }}
+        .brace-badge {{ background: #f3e8ff; color: #7e22ce; border: 1px solid #d8b4fe; padding: 1px 6px; border-radius: 4px; font-size: 11px; font-weight: 600; margin-left: 4px; }}
+
+        .audit-modal-backdrop {{ position: fixed; inset: 0; background: rgba(0, 0, 0, 0.8); backdrop-filter: blur(4px); z-index: 99999; display: none; align-items: center; justify-content: center; padding: 16px; }}
+        .audit-modal-card {{ background: #0f172a; color: white; border: 1px solid #334155; border-radius: 16px; max-width: 680px; width: 100%; max-height: 92vh; overflow-y: auto; box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.7); display: flex; flex-direction: column; }}
+        .audit-modal-header {{ background: linear-gradient(90deg, #1e293b 0%, #0f172a 100%); padding: 16px 20px; border-bottom: 1px solid #334155; display: flex; justify-content: space-between; align-items: center; }}
+        .audit-modal-close {{ background: #334155; border: none; color: #94a3b8; width: 32px; height: 32px; border-radius: 8px; font-size: 16px; cursor: pointer; font-weight: bold; transition: all 0.15s; }}
+        .audit-modal-close:hover {{ background: #475569; color: white; }}
+        .audit-num-pill {{ background: #0284c7; color: white; padding: 2px 10px; border-radius: 6px; font-family: monospace; font-weight: 800; font-size: 14px; }}
+        .audit-modal-body {{ padding: 16px 20px; }}
+        .audit-meta-grid {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 12px; }}
+        @media (max-width: 540px) {{ .audit-meta-grid {{ grid-template-columns: repeat(2, 1fr); }} }}
+        .audit-meta-cell {{ background: #1e293b; border: 1px solid #334155; border-radius: 10px; padding: 8px 12px; }}
+        .audit-meta-lbl {{ font-size: 11px; color: #94a3b8; font-weight: 600; }}
+        .audit-meta-val {{ font-size: 14px; font-weight: 800; margin-top: 2px; }}
+        .audit-brace-box {{ background: rgba(88, 28, 135, 0.3); border: 1px solid rgba(147, 51, 234, 0.4); border-radius: 10px; padding: 10px 14px; display: flex; gap: 10px; align-items: flex-start; margin-bottom: 12px; }}
+        .audit-viewport {{ height: 360px; background: #000; border-radius: 12px; border: 1px solid #334155; overflow: hidden; position: relative; cursor: grab; user-select: none; }}
+        .audit-zoom-container {{ position: absolute; top: 0; left: 0; transform-origin: 0 0; transition: transform 0.1s ease-out; }}
+        .audit-sheet-img {{ display: block; max-width: 600px; width: 600px; height: auto; pointer-events: none; }}
+        .spotlight-ring {{ position: absolute; border: 3px solid #38bdf8; border-radius: 6px; box-shadow: 0 0 0 4px rgba(56, 189, 248, 0.4), 0 0 20px rgba(56, 189, 248, 0.6); pointer-events: none; animation: pulse-ring 1.5s infinite; }}
+        @keyframes pulse-ring {{
+            0% {{ box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.4), 0 0 10px rgba(56, 189, 248, 0.4); }}
+            50% {{ box-shadow: 0 0 0 8px rgba(56, 189, 248, 0.8), 0 0 25px rgba(56, 189, 248, 0.9); }}
+            100% {{ box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.4), 0 0 10px rgba(56, 189, 248, 0.4); }}
+        }}
+        .audit-ctrl-btn {{ background: #1e293b; border: 1px solid #334155; color: #e2e8f0; padding: 4px 8px; border-radius: 6px; font-size: 11px; font-weight: 700; cursor: pointer; transition: background 0.15s; }}
+        .audit-ctrl-btn:hover {{ background: #334155; color: white; }}
+        .audit-modal-footer {{ background: #1e293b; padding: 12px 20px; border-top: 1px solid #334155; display: flex; justify-content: space-between; align-items: center; }}
+        .audit-btn-done {{ background: #0284c7; color: white; border: none; padding: 8px 16px; border-radius: 8px; font-weight: 700; font-size: 13px; cursor: pointer; }}
+        .audit-btn-done:hover {{ background: #0369a1; }}
 
         .footer-note {{ text-align: center; color: #94a3b8; font-size: 12px; margin-top: 20px; }}
     </style>
@@ -2074,7 +2257,233 @@ def render_html_dashboard(period_id: Optional[int] = None, scope: str = "period"
                 resBox.innerHTML = '<div style="color:#dc2626; padding:10px;">❌ เกิดข้อผิดพลาดในการดึงข้อมูล: ' + err.message + '</div>';
             }}
         }}
+
+        var currentAuditScale = 2.5;
+        var currentAuditX = 0;
+        var currentAuditY = 0;
+        var auditBoxCoords = null;
+        var isPanningAudit = false;
+        var panStartX = 0, panStartY = 0;
+
+        function openAuditSpotlight(el) {{
+            var num = el.getAttribute('data-num') || '';
+            var sheet = el.getAttribute('data-sheet') || '';
+            var worker = el.getAttribute('data-worker') || '';
+            var cat = el.getAttribute('data-cat') || '';
+            var time = el.getAttribute('data-time') || '';
+            var img = el.getAttribute('data-img') || '';
+            var box = el.getAttribute('data-box') || '';
+            var note = el.getAttribute('data-note') || '';
+
+            if (!img) {{
+                alert('ใบนี้ไม่มีไฟล์รูปถ่ายต้นฉบับในระบบครับ');
+                return;
+            }}
+
+            document.getElementById('auditNumTag').innerText = num;
+            document.getElementById('auditSheetId').innerText = sheet;
+            document.getElementById('auditWorker').innerText = worker;
+            document.getElementById('auditCat').innerText = cat;
+            document.getElementById('auditTime').innerText = time;
+            document.getElementById('auditFullLink').href = img;
+
+            var braceBox = document.getElementById('auditBraceBanner');
+            if (note && note.indexOf('ปีกกา') !== -1) {{
+                braceBox.style.display = 'flex';
+                document.getElementById('auditBraceTitle').innerText = '🔗 ตรวจพบปีกการ่วมกัน: ' + note;
+                document.getElementById('auditBraceDesc').innerText = 'ตัวเลขนี้อยู่ในกลุ่มปีกกาเดียวกัน มีการกำกับลำดับเพื่อความถูกต้องในการนับยอด';
+            }} else {{
+                braceBox.style.display = 'none';
+            }}
+
+            try {{
+                auditBoxCoords = box ? JSON.parse(box) : null;
+            }} catch(e) {{
+                auditBoxCoords = null;
+            }}
+
+            var modal = document.getElementById('auditModal');
+            modal.style.display = 'flex';
+            document.body.style.overflow = 'hidden';
+
+            var imgEl = document.getElementById('auditImg');
+            imgEl.src = img;
+            if (imgEl.complete && imgEl.naturalWidth > 0) {{
+                onAuditImageLoaded();
+            }}
+        }}
+
+        function onAuditImageLoaded() {{
+            var vp = document.getElementById('auditViewport');
+            var ring = document.getElementById('auditSpotlightRing');
+            var imgEl = document.getElementById('auditImg');
+            
+            if (auditBoxCoords && auditBoxCoords.length === 4) {{
+                var ymin = auditBoxCoords[0];
+                var xmin = auditBoxCoords[1];
+                var ymax = auditBoxCoords[2];
+                var xmax = auditBoxCoords[3];
+                currentAuditScale = 2.5;
+                
+                ring.style.top = (ymin / 10.0) + '%';
+                ring.style.left = (xmin / 10.0) + '%';
+                ring.style.height = ((ymax - ymin) / 10.0) + '%';
+                ring.style.width = ((xmax - xmin) / 10.0) + '%';
+                ring.style.display = 'block';
+
+                var vpW = vp.clientWidth || 640;
+                var vpH = vp.clientHeight || 360;
+                var imgW = imgEl.clientWidth || 600;
+                var imgH = imgEl.clientHeight || 800;
+
+                var targetX = ((xmin + xmax) / 2000.0) * imgW;
+                var targetY = ((ymin + ymax) / 2000.0) * imgH;
+
+                currentAuditX = (vpW / 2) - (targetX * currentAuditScale);
+                currentAuditY = (vpH / 2) - (targetY * currentAuditScale);
+            }} else {{
+                currentAuditScale = 1.0;
+                currentAuditX = 0;
+                currentAuditY = 0;
+                ring.style.display = 'none';
+            }}
+            applyAuditTransform();
+        }}
+
+        function applyAuditTransform() {{
+            var cont = document.getElementById('auditZoomContainer');
+            if (cont) {{
+                cont.style.transform = 'translate(' + currentAuditX + 'px, ' + currentAuditY + 'px) scale(' + currentAuditScale + ')';
+            }}
+            var ind = document.getElementById('auditZoomIndicator');
+            if (ind) {{
+                ind.innerText = 'ซูม ' + Math.round(currentAuditScale * 100) + '%';
+            }}
+        }}
+
+        function zoomAudit(delta) {{
+            currentAuditScale = Math.max(0.5, Math.min(6.0, currentAuditScale + delta));
+            applyAuditTransform();
+        }}
+
+        function resetAuditZoom() {{
+            currentAuditScale = 1.0;
+            currentAuditX = 0;
+            currentAuditY = 0;
+            applyAuditTransform();
+        }}
+
+        function closeAuditModal() {{
+            var modal = document.getElementById('auditModal');
+            if (modal) modal.style.display = 'none';
+            document.body.style.overflow = '';
+        }}
+
+        window.addEventListener('DOMContentLoaded', function() {{
+            var vp = document.getElementById('auditViewport');
+            if (!vp) return;
+            vp.addEventListener('mousedown', function(e) {{
+                isPanningAudit = true;
+                panStartX = e.clientX - currentAuditX;
+                panStartY = e.clientY - currentAuditY;
+                vp.style.cursor = 'grabbing';
+            }});
+            window.addEventListener('mousemove', function(e) {{
+                if (!isPanningAudit) return;
+                currentAuditX = e.clientX - panStartX;
+                currentAuditY = e.clientY - panStartY;
+                applyAuditTransform();
+            }});
+            window.addEventListener('mouseup', function() {{
+                isPanningAudit = false;
+                if (vp) vp.style.cursor = 'grab';
+            }});
+            window.addEventListener('keydown', function(e) {{
+                if (e.key === 'Escape') closeAuditModal();
+            }});
+        }});
     </script>
+
+    <!-- Traceability & Auto-Zoom Spotlight Modal -->
+    <div id="auditModal" class="audit-modal-backdrop" onclick="if(event.target === this) closeAuditModal();">
+        <div class="audit-modal-card">
+            <div class="audit-modal-header">
+                <div style="display:flex; align-items:center; gap:10px;">
+                    <span style="font-size:22px;">🔍</span>
+                    <div>
+                        <div style="font-size:16px; font-weight:800; color:white; display:flex; align-items:center; gap:8px;">
+                            <span>ตรวจสอบที่มาของตัวเลข:</span>
+                            <span id="auditNumTag" class="audit-num-pill">-</span>
+                        </div>
+                        <div style="font-size:12px; color:#94a3b8; margin-top:2px;">ตรวจสอบย้อนกลับไปยังภาพถ่ายกระดาษโพยของจริง</div>
+                    </div>
+                </div>
+                <button type="button" class="audit-modal-close" onclick="closeAuditModal()">✕</button>
+            </div>
+            
+            <div class="audit-modal-body">
+                <!-- Metadata Grid -->
+                <div class="audit-meta-grid">
+                    <div class="audit-meta-cell">
+                        <div class="audit-meta-lbl">📋 มาจากใบที่</div>
+                        <div id="auditSheetId" class="audit-meta-val" style="color:#38bdf8;">-</div>
+                    </div>
+                    <div class="audit-meta-cell">
+                        <div class="audit-meta-lbl">👤 ผู้ส่งรูป</div>
+                        <div id="auditWorker" class="audit-meta-val" style="color:white;">-</div>
+                    </div>
+                    <div class="audit-meta-cell">
+                        <div class="audit-meta-lbl">📂 หมวดหมู่</div>
+                        <div id="auditCat" class="audit-meta-val" style="color:#fbbf24;">-</div>
+                    </div>
+                    <div class="audit-meta-cell">
+                        <div class="audit-meta-lbl">⏰ เวลาที่ส่ง</div>
+                        <div id="auditTime" class="audit-meta-val" style="color:#cbd5e1; font-size:12px;">-</div>
+                    </div>
+                </div>
+
+                <!-- Brace Group Info Banner -->
+                <div id="auditBraceBanner" class="audit-brace-box" style="display:none;">
+                    <span style="font-size:18px;">🔗</span>
+                    <div>
+                        <div id="auditBraceTitle" style="font-weight:700; color:#e9d5ff;">ปีกการ่วมกัน</div>
+                        <div id="auditBraceDesc" style="font-size:12px; color:#d8b4fe; margin-top:2px;">รายการนี้ใช้ยอดเงินร่วมกับแถวอื่นๆ ในกลุ่มปีกกาเดียวกัน มีการกำกับลำดับเพื่อความถูกต้องในการนับยอด</div>
+                    </div>
+                </div>
+
+                <!-- Auto-Zoom Spotlight Image Viewport -->
+                <div style="margin-top:12px;">
+                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; flex-wrap:wrap; gap:6px;">
+                        <div style="font-size:13px; font-weight:700; color:#e2e8f0; display:flex; align-items:center; gap:6px;">
+                            <span>📷 ภาพถ่ายกระดาษต้นฉบับ</span>
+                            <span id="auditZoomIndicator" style="font-size:11px; background:#0284c7; color:white; padding:1px 6px; border-radius:4px;">ซูม 250%</span>
+                        </div>
+                        <div style="display:flex; gap:6px;">
+                            <button type="button" class="audit-ctrl-btn" onclick="zoomAudit(0.4)" title="ซูมเข้า">➕ ขยาย</button>
+                            <button type="button" class="audit-ctrl-btn" onclick="zoomAudit(-0.4)" title="ซูมออก">➖ ย่อ</button>
+                            <button type="button" class="audit-ctrl-btn" onclick="resetAuditZoom()" title="รีเซ็ต">🔄 รีเซ็ต</button>
+                            <a id="auditFullLink" href="#" target="_blank" class="audit-ctrl-btn" style="text-decoration:none;" title="เปิดภาพเต็มจอ">🔍 ภาพเต็มจอ</a>
+                        </div>
+                    </div>
+
+                    <div id="auditViewport" class="audit-viewport">
+                        <div id="auditZoomContainer" class="audit-zoom-container">
+                            <img id="auditImg" src="" alt="Sheet Photo" class="audit-sheet-img" onload="onAuditImageLoaded()">
+                            <div id="auditSpotlightRing" class="spotlight-ring" style="display:none;"></div>
+                        </div>
+                    </div>
+                    <div style="font-size:11px; color:#64748b; margin-top:6px; text-align:center;">
+                        💡 คลิกค้างแล้วลาก (Drag) เพื่อเลื่อนดูบริบทโดยรอบตำแหน่งตัวเลขได้อิสระ
+                    </div>
+                </div>
+            </div>
+
+            <div class="audit-modal-footer">
+                <span style="font-size:12px; color:#64748b;">✨ ตรวจสอบความถูกต้องได้ทุกตัวเลขในตาราง</span>
+                <button type="button" class="audit-btn-done" onclick="closeAuditModal()">ตกลง / ปิดหน้าต่าง</button>
+            </div>
+        </div>
+    </div>
 </body>
 </html>
 """

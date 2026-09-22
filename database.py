@@ -148,7 +148,10 @@ def init_db():
     ])
     ensure_columns("entries", [
         ("period_id", "INTEGER DEFAULT 1"),
-        ("worker_code", "TEXT DEFAULT 'A'")
+        ("worker_code", "TEXT DEFAULT 'A'"),
+        ("box_2d", "TEXT DEFAULT ''"),
+        ("snippet_path", "TEXT DEFAULT ''"),
+        ("uncertain_note", "TEXT DEFAULT ''")
     ])
     ensure_columns("pending_scans", [
         ("image_path", "TEXT DEFAULT ''"),
@@ -448,9 +451,12 @@ def confirm_pending_scan(scan_id: int) -> Optional[Dict]:
     for col_key, col_label in columns_map:
         items = val_cols.get(col_key, [])
         for itm in items:
+            box_str = json.dumps(itm.get("box_2d", [])) if itm.get("box_2d") else ""
+            snip_path = itm.get("snippet_path", "")
+            unc_note = itm.get("uncertain_note", "")
             cursor.execute("""
-            INSERT INTO entries (period_id, sheet_db_id, sheet_id, employee_name, worker_code, date_str, category, set1, set2, set3, raw_text, is_valid, validation_error)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO entries (period_id, sheet_db_id, sheet_id, employee_name, worker_code, date_str, category, set1, set2, set3, raw_text, is_valid, validation_error, box_2d, snippet_path, uncertain_note)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 period_id,
                 sheet_db_id,
@@ -464,7 +470,10 @@ def confirm_pending_scan(scan_id: int) -> Optional[Dict]:
                 itm.get("set3", ""),
                 itm.get("raw_text", ""),
                 1 if itm.get("is_valid") else 0,
-                "; ".join(itm.get("errors", []))
+                "; ".join(itm.get("errors", [])),
+                box_str,
+                snip_path,
+                unc_note
             ))
             
     cursor.execute("UPDATE pending_scans SET status = 'CONFIRMED' WHERE id = ?", (scan_id,))
@@ -481,6 +490,24 @@ def cancel_pending_scan(scan_id: int) -> bool:
     conn.commit()
     conn.close()
     return success
+
+def is_sheet_id_taken(period_id: int, sheet_id: str) -> bool:
+    """Checks whether a sheet_id is already used in confirmed sheets or active pending_scans for a period."""
+    if not sheet_id:
+        return False
+    init_db()
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT 1 FROM sheets WHERE period_id = ? AND sheet_id = ?", (period_id, sheet_id))
+    if cursor.fetchone():
+        conn.close()
+        return True
+    cursor.execute("SELECT 1 FROM pending_scans WHERE period_id = ? AND sheet_id = ? AND status = 'PENDING'", (period_id, sheet_id))
+    if cursor.fetchone():
+        conn.close()
+        return True
+    conn.close()
+    return False
 
 def get_next_available_sheet_id(period_id: int, worker_code: str) -> str:
     """

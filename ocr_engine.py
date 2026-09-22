@@ -62,12 +62,14 @@ SYSTEM_PROMPT = """คุณคือ AI ผู้เชี่ยวชาญร
 - หากพบเครื่องหมายปีกกา '{' หรือ '}' เส้นโยง เส้นปีกกาแนวดิ่ง หรือลูกศร คลุมกลุ่มตัวเลขหวย (set1) หลายตัว เพื่อชี้ไปที่ยอดเงิน (set2) ก้อนเดียวกัน
   (เช่น ตัวเลข 401, 402, 403, 404, 405 เขียนเรียงลงมา แล้วมีปีกกา '}' คลุมทั้งหมด ชี้ไปที่ยอดเงิน 20x20 หรือ 50 ก้อนเดียว)
 - กฎเหล็ก: ให้กระจายยอดเงิน (set2) และรหัสพิเศษ (set3) นั้น ให้กับตัวเลขหวยทุกตัวในกลุ่มนั้น แยกเป็นคนละรายการใน Array ทันที
-  ตัวอย่างผลลัพธ์ที่ต้องสกัดได้:
-  {"set1": "401", "set2": "20x20", "set3": "", "raw_text": "401 = 20x20", "confidence": "high", "uncertain_note": ""}
-  {"set1": "402", "set2": "20x20", "set3": "", "raw_text": "402 = 20x20", "confidence": "high", "uncertain_note": ""}
-  {"set1": "403", "set2": "20x20", "set3": "", "raw_text": "403 = 20x20", "confidence": "high", "uncertain_note": ""}
-  {"set1": "404", "set2": "20x20", "set3": "", "raw_text": "404 = 20x20", "confidence": "high", "uncertain_note": ""}
-  {"set1": "405", "set2": "20x20", "set3": "", "raw_text": "405 = 20x20", "confidence": "high", "uncertain_note": ""}
+- การระบุตัวเลขกำกับปีกกา: ในช่อง "uncertain_note" ของทุกตัวที่อยู่ในปีกกา ให้ระบุข้อความมาตรฐานเป็นลำดับและจำนวนรวม:
+  "ปีกการ่วมกัน [ลำดับ]/[จำนวนรวมในปีกกานั้น]"
+  ตัวอย่าง: มี 5 ตัวในปีกกาเดียวกัน:
+  ตัวที่ 1: "uncertain_note": "ปีกการ่วมกัน 1/5"
+  ตัวที่ 2: "uncertain_note": "ปีกการ่วมกัน 2/5"
+  ตัวที่ 3: "uncertain_note": "ปีกการ่วมกัน 3/5"
+  ตัวที่ 4: "uncertain_note": "ปีกการ่วมกัน 4/5"
+  ตัวที่ 5: "uncertain_note": "ปีกการ่วมกัน 5/5"
 - ห้ามจับคู่ให้แค่ตัวเลขที่อยู่ตรงกลางตัวเดียวเด็ดขาด ตัวเลขทุกตัวที่อยู่ในปีกกาหรือเส้นโยงเดียวกัน จะต้องได้รับยอดเงินนั้นอย่างครบถ้วนทุกรายการ
 
 =======================================================
@@ -75,8 +77,9 @@ SYSTEM_PROMPT = """คุณคือ AI ผู้เชี่ยวชาญร
 =======================================================
 - ทุกรายการใน columns ต้องระบุ:
   * "confidence": "high" (อ่านชัดเจนมั่นใจ) หรือ "low" (ลายมือหวัดมาก, หมึกจาง, หรือก้ำกึ่งระหว่างตัวเลขสองตัว เช่น 3 หรือ 8)
-  * "uncertain_note": หากเป็น "low" ให้อธิบายสั้นๆ เช่น "เลขท้ายอาจเป็น 4 หรือ 9", "หมึกจาง", "เลข 3 หรือ 8" (ถ้ามั่นใจให้ใส่ "")
+  * "uncertain_note": หากเป็น "low" ให้อธิบายสั้นๆ เช่น "เลขท้ายอาจเป็น 4 หรือ 9", "หมึกจาง", "เลข 3 หรือ 8" หรือถ้ามาจากปีกกาให้ใส่ "ปีกการ่วมกัน N/M" (ถ้ามั่นใจและไม่มีปีกกาให้ใส่ "")
   * หากหลักใดอ่านไม่ออกจริงๆ ให้ใช้เครื่องหมาย '?' แทนหลักนั้นได้ เช่น "40?"
+  * "box_2d": [ymin, xmin, ymax, xmax] พิกัดกรอบล้อมรอบตัวเลขแถวนั้น (สเกล normalized 0 ถึง 1000 เทียบกับความสูง-ความกว้างของภาพ) เช่น [180, 150, 240, 500]
 - "unclear_notes": สรุปจุดที่พบลายมือเขียนแต่เบลอจนอ่านไม่ออก หรือรายการที่มีความไม่ชัดเจน เป็น Array ของข้อความ เช่น ["พบลายมือหมึกจางแถวล่างแต่อ่านไม่ออก", "เลข 404 ไม่ชัด"]
 
 =======================================================
@@ -113,7 +116,8 @@ SYSTEM_PROMPT = """คุณคือ AI ผู้เชี่ยวชาญร
         "set2": "120x120",
         "raw_text": "401 = 120x120",
         "confidence": "high",
-        "uncertain_note": ""
+        "uncertain_note": "",
+        "box_2d": [180, 150, 230, 480]
       }
     ],
     "bottom": [
@@ -123,7 +127,8 @@ SYSTEM_PROMPT = """คุณคือ AI ผู้เชี่ยวชาญร
         "set2": "50",
         "raw_text": "12 = 50",
         "confidence": "high",
-        "uncertain_note": ""
+        "uncertain_note": "",
+        "box_2d": [550, 150, 600, 400]
       }
     ],
     "top_bottom": []
@@ -163,9 +168,14 @@ RESPONSE_SCHEMA = {
                             "set2": {"type": "STRING", "description": "ชุด 2: ตัวเลขเดี่ยว หรือ NxN"},
                             "raw_text": {"type": "STRING", "description": "ข้อความดิบที่เห็น"},
                             "confidence": {"type": "STRING", "description": "'high' หากมั่นใจ 100%, 'low' หากไม่แน่ใจ"},
-                            "uncertain_note": {"type": "STRING", "description": "คำอธิบายสั้นๆ ถ้า confidence=low เช่น 'ตัวเลขเบลอ อาจเป็น 3 หรือ 8'"}
+                            "uncertain_note": {"type": "STRING", "description": "คำอธิบายสั้นๆ ถ้า confidence=low หรือ 'ปีกการ่วมกัน N/M'"},
+                            "box_2d": {
+                                "type": "ARRAY",
+                                "description": "พิกัด [ymin, xmin, ymax, xmax] ในสเกล 0-1000 เทียบกับขนาดภาพ",
+                                "items": {"type": "INTEGER"}
+                            }
                         },
-                        "required": ["set1", "set3", "set2", "confidence", "uncertain_note"]
+                        "required": ["set1", "set3", "set2", "confidence", "uncertain_note", "box_2d"]
                     }
                 },
                 "bottom": {
@@ -179,9 +189,14 @@ RESPONSE_SCHEMA = {
                             "set2": {"type": "STRING", "description": "ชุด 2: ตัวเลขเดี่ยว หรือ NxN"},
                             "raw_text": {"type": "STRING", "description": "ข้อความดิบที่เห็น"},
                             "confidence": {"type": "STRING", "description": "'high' หากมั่นใจ 100%, 'low' หากไม่แน่ใจ"},
-                            "uncertain_note": {"type": "STRING", "description": "คำอธิบายสั้นๆ ถ้า confidence=low เช่น 'ตัวเลขเบลอ อาจเป็น 3 หรือ 8'"}
+                            "uncertain_note": {"type": "STRING", "description": "คำอธิบายสั้นๆ ถ้า confidence=low หรือ 'ปีกการ่วมกัน N/M'"},
+                            "box_2d": {
+                                "type": "ARRAY",
+                                "description": "พิกัด [ymin, xmin, ymax, xmax] ในสเกล 0-1000 เทียบกับขนาดภาพ",
+                                "items": {"type": "INTEGER"}
+                            }
                         },
-                        "required": ["set1", "set3", "set2", "confidence", "uncertain_note"]
+                        "required": ["set1", "set3", "set2", "confidence", "uncertain_note", "box_2d"]
                     }
                 },
                 "top_bottom": {
@@ -195,9 +210,14 @@ RESPONSE_SCHEMA = {
                             "set2": {"type": "STRING", "description": "ชุด 2: ตัวเลขเดี่ยว หรือ NxN"},
                             "raw_text": {"type": "STRING", "description": "ข้อความดิบที่เห็น"},
                             "confidence": {"type": "STRING", "description": "'high' หากมั่นใจ 100%, 'low' หากไม่แน่ใจ"},
-                            "uncertain_note": {"type": "STRING", "description": "คำอธิบายสั้นๆ ถ้า confidence=low เช่น 'ตัวเลขเบลอ อาจเป็น 3 หรือ 8'"}
+                            "uncertain_note": {"type": "STRING", "description": "คำอธิบายสั้นๆ ถ้า confidence=low หรือ 'ปีกการ่วมกัน N/M'"},
+                            "box_2d": {
+                                "type": "ARRAY",
+                                "description": "พิกัด [ymin, xmin, ymax, xmax] ในสเกล 0-1000 เทียบกับขนาดภาพ",
+                                "items": {"type": "INTEGER"}
+                            }
                         },
-                        "required": ["set1", "set3", "set2", "confidence", "uncertain_note"]
+                        "required": ["set1", "set3", "set2", "confidence", "uncertain_note", "box_2d"]
                     }
                 }
             },
