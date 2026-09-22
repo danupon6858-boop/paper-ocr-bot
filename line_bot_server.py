@@ -122,6 +122,231 @@ def deliver_message(user_id: str, reply_token: str, text: str, quick_reply_items
         }
     return deliver_messages(user_id, reply_token, [msg_obj])
 
+def deliver_flex_message(user_id: str, reply_token: str, flex_obj: dict, quick_reply_items: list = None) -> bool:
+    """Delivers a LINE Flex Message bubble, with optional Quick Reply items attached."""
+    msg_obj = dict(flex_obj)
+    if quick_reply_items:
+        msg_obj["quickReply"] = {
+            "items": [
+                {"type": "action", "action": {"type": "message", "label": label, "text": text_val}}
+                for label, text_val in quick_reply_items
+            ]
+        }
+    return deliver_messages(user_id, reply_token, [msg_obj])
+
+# ==================== MULTI-IMAGE CONCURRENCY & QUEUE ====================
+_user_locks = {}
+_user_locks_mutex = threading.Lock()
+
+def get_user_lock(user_id: str) -> threading.Lock:
+    """Per-user lock ensuring atomic sheet ID allocation and pending scan creation."""
+    with _user_locks_mutex:
+        if user_id not in _user_locks:
+            _user_locks[user_id] = threading.Lock()
+        return _user_locks[user_id]
+
+_user_active_jobs = {}
+_user_jobs_mutex = threading.Lock()
+
+def build_flex_ocr_card(
+    scan_id: int,
+    sheet_id: str,
+    emp_name: str,
+    worker_code: str,
+    period_name: str,
+    summary_badge: str,
+    clean_text: str,
+    uncertain_count: int = 0,
+    unclear_block: str = "",
+    pending_count: int = 1,
+    batch_tag: str = ""
+) -> dict:
+    """Builds a rich LINE Flex Message card with permanent [ยืนยัน] and [ยกเลิก] buttons inside the card bubble."""
+    display_text = clean_text
+    if len(display_text) > 1800:
+        lines = display_text.splitlines()
+        truncated = lines[:35]
+        truncated.append(f"... (มีต่ออีก {len(lines) - 35} บรรทัด ตรวจสอบเต็มได้บนเว็บ)")
+        display_text = "\n".join(truncated)
+
+    body_contents = [
+        {
+            "type": "box",
+            "layout": "vertical",
+            "backgroundColor": "#f0fdf4" if uncertain_count == 0 else "#fffbeb",
+            "cornerRadius": "8px",
+            "paddingAll": "8px",
+            "contents": [
+                {
+                    "type": "text",
+                    "text": summary_badge,
+                    "size": "xs",
+                    "weight": "bold",
+                    "color": "#16a34a" if uncertain_count == 0 else "#d97706",
+                    "wrap": True
+                }
+            ]
+        },
+        {"type": "separator", "margin": "md"},
+        {
+            "type": "box",
+            "layout": "vertical",
+            "backgroundColor": "#f8fafc",
+            "cornerRadius": "8px",
+            "paddingAll": "10px",
+            "margin": "md",
+            "contents": [
+                {
+                    "type": "text",
+                    "text": display_text,
+                    "size": "sm",
+                    "color": "#1e293b",
+                    "wrap": True
+                }
+            ]
+        }
+    ]
+
+    if unclear_block.strip():
+        body_contents.append({
+            "type": "text",
+            "text": unclear_block.strip(),
+            "size": "xs",
+            "color": "#b45309",
+            "wrap": True,
+            "margin": "md"
+        })
+
+    if pending_count > 1:
+        body_contents.append({
+            "type": "box",
+            "layout": "vertical",
+            "backgroundColor": "#eff6ff",
+            "cornerRadius": "6px",
+            "paddingAll": "8px",
+            "margin": "md",
+            "contents": [
+                {
+                    "type": "text",
+                    "text": f"💡 มีรายการรอยืนยัน {pending_count} ใบ (กดปุ่มด้านล่าง หรือพิมพ์ 'ยืนยันทั้งหมด')",
+                    "size": "xxs",
+                    "color": "#2563eb",
+                    "wrap": True
+                }
+            ]
+        })
+
+    body_contents.append({
+        "type": "text",
+        "text": "• คัดลอกข้อความไปแก้แล้วส่งกลับ หรือกดปุ่มด้านล่างเพื่อยืนยัน",
+        "size": "xxs",
+        "color": "#94a3b8",
+        "wrap": True,
+        "margin": "sm"
+    })
+
+    bubble = {
+        "type": "bubble",
+        "size": "mega",
+        "header": {
+            "type": "box",
+            "layout": "vertical",
+            "backgroundColor": "#0f172a",
+            "paddingAll": "14px",
+            "contents": [
+                {
+                    "type": "box",
+                    "layout": "horizontal",
+                    "contents": [
+                        {
+                            "type": "text",
+                            "text": f"📋 ใบที่: {sheet_id}",
+                            "weight": "bold",
+                            "color": "#38bdf8",
+                            "size": "md",
+                            "flex": 3
+                        },
+                        {
+                            "type": "text",
+                            "text": batch_tag if batch_tag else "",
+                            "size": "xs",
+                            "color": "#94a3b8",
+                            "align": "end",
+                            "flex": 2
+                        }
+                    ]
+                },
+                {
+                    "type": "text",
+                    "text": f"👤 {emp_name} ({worker_code}) | {period_name}",
+                    "size": "xs",
+                    "color": "#cbd5e1",
+                    "margin": "xs"
+                }
+            ]
+        },
+        "body": {
+            "type": "box",
+            "layout": "vertical",
+            "paddingAll": "14px",
+            "spacing": "sm",
+            "contents": body_contents
+        },
+        "footer": {
+            "type": "box",
+            "layout": "vertical",
+            "spacing": "sm",
+            "paddingAll": "12px",
+            "contents": [
+                {
+                    "type": "box",
+                    "layout": "horizontal",
+                    "spacing": "sm",
+                    "contents": [
+                        {
+                            "type": "button",
+                            "style": "primary",
+                            "color": "#16a34a",
+                            "height": "sm",
+                            "action": {
+                                "type": "message",
+                                "label": "✅ ยืนยันใบนี้",
+                                "text": f"ยืนยัน {scan_id}"
+                            }
+                        },
+                        {
+                            "type": "button",
+                            "style": "secondary",
+                            "color": "#dc2626",
+                            "height": "sm",
+                            "action": {
+                                "type": "message",
+                                "label": "❌ ยกเลิก",
+                                "text": f"ยกเลิก {scan_id}"
+                            }
+                        }
+                    ]
+                },
+                {
+                    "type": "button",
+                    "style": "link",
+                    "height": "sm",
+                    "action": {
+                        "type": "uri",
+                        "label": "✏️ ตรวจสอบ/แก้ไขบนเว็บ",
+                        "uri": f"{BASE_URL}/edit/{scan_id}"
+                    }
+                }
+            ]
+        }
+    }
+
+    return {
+        "type": "flex",
+        "altText": f"📋 ข้อมูลใบที่ {sheet_id} (รอกดยืนยัน)",
+        "contents": bubble
+    }
+
 def send_line_loading_indicator(chat_id: str, loading_seconds: int = 60):
     url = "https://api.line.me/v2/bot/chat/loading/start"
     payload = {
@@ -508,10 +733,12 @@ def handle_edit_command(text: str, user_id: str, reply_token: str) -> bool:
     return True
 
 
-def handle_image_message(message_id: str, reply_token: str, user_id: str, user_info: dict):
+def handle_image_message(message_id: str, reply_token: str, user_id: str, user_info: dict, job_idx: int = 1):
     # 1. Check Period Status
     active_p = database.get_active_period()
     if not active_p:
+        with _user_jobs_mutex:
+            _user_active_jobs[user_id] = max(0, _user_active_jobs.get(user_id, 1) - 1)
         msg = (
             "⛔️ ขออภัยครับ ขณะนี้ระบบปิดรับข้อมูล (ยังไม่เปิดงวดใหม่)\n"
             "กรุณารอเจ้าของเปิดงวดก่อนส่งรูปครับ\n\n"
@@ -520,17 +747,17 @@ def handle_image_message(message_id: str, reply_token: str, user_id: str, user_i
         deliver_message(user_id, reply_token, msg)
         return
 
-    # Start 60s typing indicator (native animation in LINE chat; no chat clutter, preserves replyToken)
+    # Start 60s typing indicator (native animation in LINE chat)
     send_line_loading_indicator(user_id, 60)
 
     try:
         worker_code = user_info.get("worker_code", "A")
         emp_name = user_info.get("display_name", "พนักงาน")
 
-        print(f"Downloading image from {emp_name} ({worker_code})...")
+        print(f"Downloading image #{job_idx} from {emp_name} ({worker_code})...")
         img_bytes = get_line_image_content(message_id)
         
-        print("Processing OCR with Gemini 3.6 Flash...")
+        print(f"Processing OCR #{job_idx} with Gemini 3.6 Flash...")
         ocr_start_time = time.time()
         ocr_result = ocr_engine.extract_from_image(img_bytes)
         ocr_latency_ms = int((time.time() - ocr_start_time) * 1000)
@@ -540,7 +767,7 @@ def handle_image_message(message_id: str, reply_token: str, user_id: str, user_i
         total_raw = sum(len(items) for items in raw_cols.values())
         if total_raw == 0:
             no_data_msg = (
-                "⚠️ ภาพนี้ระบบอ่านตัวเลขไม่พบ หรือลายมือไม่ชัดเจนครับ\n"
+                f"⚠️ ภาพนี้ (รูปที่ {job_idx}) ระบบอ่านตัวเลขไม่พบ หรือลายมือไม่ชัดเจนครับ\n"
                 "─────────────────────────\n"
                 "💡 คำแนะนำ:\n"
                 "1. ตรวจสอบความสว่าง/ความคมชัด แล้วถ่ายรูปส่งใหม่อีกครั้งครับ 📷\n"
@@ -552,48 +779,50 @@ def handle_image_message(message_id: str, reply_token: str, user_id: str, user_i
             deliver_message(user_id, reply_token, no_data_msg)
             return
 
-        print("Validating rules...")
+        print(f"Validating rules #{job_idx}...")
         val_result = OCRValidator.validate_document(ocr_result)
         
-        # Prepend worker code to sheet_id if not already there
         header = ocr_result.get("header") if isinstance(ocr_result.get("header"), dict) else {}
         ocr_result["header"] = header
         raw_sheet_id = str(header.get("sheet_id") or "").strip()
-        if raw_sheet_id and raw_sheet_id.lower() not in ["none", "null", "n/a", ""]:
-            formatted_sheet_id = f"{worker_code}-{raw_sheet_id}" if not raw_sheet_id.startswith(f"{worker_code}-") else raw_sheet_id
-        else:
-            formatted_sheet_id = f"{worker_code}-1"
-            raw_sheet_id = "1"
-            
-        ocr_result["header"]["sheet_id"] = formatted_sheet_id
-        ocr_result["header"]["customer_name"] = emp_name
 
-        # Save uploaded image to disk for training archive and dashboard viewing
-        image_path = database.save_uploaded_image(img_bytes, active_p["id"], formatted_sheet_id)
-        if image_path:
-            import gdrive_sync
-            gdrive_sync.trigger_image_backup(image_path)
+        # Thread-safe Sheet ID resolution, image saving, duplicate check, and pending scan creation
+        user_lock = get_user_lock(user_id)
+        with user_lock:
+            if raw_sheet_id and raw_sheet_id.lower() not in ["none", "null", "n/a", ""]:
+                formatted_sheet_id = f"{worker_code}-{raw_sheet_id}" if not raw_sheet_id.startswith(f"{worker_code}-") else raw_sheet_id
+            else:
+                formatted_sheet_id = database.get_next_available_sheet_id(active_p["id"], worker_code)
+                raw_sheet_id = formatted_sheet_id.split("-", 1)[1] if "-" in formatted_sheet_id else formatted_sheet_id
 
-        # 2. Check Duplicate Sheet
-        is_dup, dup_msg = database.check_duplicate_sheet(
-            active_p["id"], formatted_sheet_id, val_result.get("validated_columns", {})
-        )
-        if is_dup:
-            dup_reply = (
-                f"⛔️ [ตรวจพบกระดาษซ้ำแผ่นเดียวกัน!]\n"
-                f"─────────────────────────\n"
-                f"{dup_msg}\n\n"
-                f"💡 ระบบระงับการบันทึกใบนี้ เพื่อป้องกันตัวเลขเบิ้ลครับ"
+            ocr_result["header"]["sheet_id"] = formatted_sheet_id
+            ocr_result["header"]["customer_name"] = emp_name
+
+            # Save uploaded image to disk for training archive and dashboard viewing
+            image_path = database.save_uploaded_image(img_bytes, active_p["id"], formatted_sheet_id)
+            if image_path:
+                import gdrive_sync
+                gdrive_sync.trigger_image_backup(image_path)
+
+            # Check Duplicate Sheet
+            is_dup, dup_msg = database.check_duplicate_sheet(
+                active_p["id"], formatted_sheet_id, val_result.get("validated_columns", {})
             )
-            deliver_message(user_id, reply_token, dup_reply)
-            return
+            if is_dup:
+                dup_reply = (
+                    f"⛔️ [ตรวจพบกระดาษซ้ำแผ่นเดียวกัน!]\n"
+                    f"─────────────────────────\n"
+                    f"{dup_msg}\n\n"
+                    f"💡 ระบบระงับการบันทึกใบนี้ เพื่อป้องกันตัวเลขเบิ้ลครับ"
+                )
+                deliver_message(user_id, reply_token, dup_reply)
+                return
 
-        # 3. Create Pending Scan
-        scan_id = database.create_pending_scan(
-            user_id, worker_code, emp_name, active_p["id"], formatted_sheet_id, ocr_result, val_result,
-            image_path=image_path, ocr_latency_ms=ocr_latency_ms
-        )
-
+            # Create Pending Scan
+            scan_id = database.create_pending_scan(
+                user_id, worker_code, emp_name, active_p["id"], formatted_sheet_id, ocr_result, val_result,
+                image_path=image_path, ocr_latency_ms=ocr_latency_ms
+            )
 
         valid_cols = val_result.get("validated_columns", {})
         top_items = valid_cols.get("top", [])
@@ -624,26 +853,51 @@ def handle_image_message(message_id: str, reply_token: str, user_id: str, user_i
         if unclear_notes:
             unclear_block = "⚠️ จุดที่ AI สังเกตว่าไม่ชัดเจน:\n" + "\n".join(f"• {n}" for n in unclear_notes[:3]) + "\n─────────────────────────\n"
 
-        # Combine summary header, clean editable numbers, and instructions into 1 single message bubble
         clean_text = format_clean_editable_text(raw_sheet_id, valid_cols)
         
-        combined_text = (
-            f"📌 ข้อมูลนี้จะถูกบันทึกลงใน: {active_p['name']}\n"
-            f"📋 อ่านข้อมูลได้ [ใบที่: {formatted_sheet_id}]\n"
-            f"{summary_badge} | ผู้ส่ง: {emp_name} ({worker_code})\n"
-            f"─────────────────────────\n"
-            f"{clean_text}\n"
-            f"─────────────────────────\n"
-            f"{unclear_block}"
-            f"{hint_block}"
-        )
+        # Check active pending scans count for this user
+        all_pendings = database.get_all_pending_scans(user_id)
+        pending_count = len(all_pendings)
         
+        batch_tag = f"รูปที่ {job_idx}" if job_idx > 1 else ""
+
         quick_replies = [
-            ("✅ ยืนยัน", f"ยืนยัน {scan_id}"),
+            ("✅ ยืนยันใบนี้", f"ยืนยัน {scan_id}"),
             ("❌ ยกเลิก", f"ยกเลิก {scan_id}")
         ]
-        
-        deliver_message(user_id, reply_token, combined_text, quick_replies)
+        if pending_count > 1:
+            quick_replies.append(("✅ ยืนยันทั้งหมด", "ยืนยันทั้งหมด"))
+            quick_replies.append(("❌ ยกเลิกทั้งหมด", "ยกเลิกทั้งหมด"))
+
+        # Build permanent Flex Message card
+        flex_card = build_flex_ocr_card(
+            scan_id=scan_id,
+            sheet_id=formatted_sheet_id,
+            emp_name=emp_name,
+            worker_code=worker_code,
+            period_name=active_p["name"],
+            summary_badge=summary_badge,
+            clean_text=clean_text,
+            uncertain_count=uncertain_count,
+            unclear_block=unclear_block,
+            pending_count=pending_count,
+            batch_tag=batch_tag
+        )
+
+        sent_ok = deliver_flex_message(user_id, reply_token, flex_card, quick_replies)
+        if not sent_ok:
+            # Fallback to plain text message if Flex delivery encounters any issue
+            combined_text = (
+                f"📌 ข้อมูลนี้จะถูกบันทึกลงใน: {active_p['name']}\n"
+                f"📋 อ่านข้อมูลได้ [ใบที่: {formatted_sheet_id}]\n"
+                f"{summary_badge} | ผู้ส่ง: {emp_name} ({worker_code})\n"
+                f"─────────────────────────\n"
+                f"{clean_text}\n"
+                f"─────────────────────────\n"
+                f"{unclear_block}"
+                f"{hint_block}"
+            )
+            deliver_message(user_id, reply_token, combined_text, quick_replies)
         
     except Exception as e:
         import traceback
@@ -672,6 +926,13 @@ def handle_image_message(message_id: str, reply_token: str, user_id: str, user_i
                 "401 = 120x120"
             )
         deliver_message(user_id, reply_token, err_msg)
+    finally:
+        with _user_jobs_mutex:
+            _user_active_jobs[user_id] = max(0, _user_active_jobs.get(user_id, 1) - 1)
+            remaining_jobs = _user_active_jobs[user_id]
+        if remaining_jobs > 0:
+            # Re-activate loading animation in LINE chat because previous message delivery cancelled it
+            send_line_loading_indicator(user_id, 60)
 
 def handle_owner_command(text: str, reply_token: str, user_id: str = "") -> bool:
     clean = text.strip()
@@ -766,6 +1027,52 @@ def handle_text_message(text: str, reply_token: str, user_id: str, is_owner: boo
     if is_owner and handle_owner_command(clean_text, reply_token, user_id):
         return
 
+    # 1.0. Batch Confirm & Cancel Commands
+    if clean_text in ["ยืนยันทั้งหมด", "ยืนยันทุกใบ", "confirm all"]:
+        confirmed_list = database.confirm_all_pending_scans(user_id)
+        if confirmed_list:
+            import gdrive_sync
+            gdrive_sync.trigger_db_backup()
+            active_p = database.get_active_period()
+            p_name = active_p["name"] if active_p else "งวดปัจจุบัน"
+            sids = ", ".join(f"[{c['sheet_id']}]" for c in confirmed_list)
+            msg = (
+                f"✅ ยืนยันบันทึกข้อมูลเรียบร้อยแล้วทั้งหมด {len(confirmed_list)} ใบ!\n"
+                f"📋 รายการ: {sids}\n"
+                f"📌 ข้อมูลถูกบันทึกลงใน: {p_name}\n\n"
+                f"🌐 ดูกระดานสรุปสด: {BASE_URL}"
+            )
+            reply_line_message(reply_token, msg)
+        else:
+            reply_line_message(reply_token, "⚠️ ไม่พบรายการที่รอกดยืนยันในขณะนี้ครับ")
+        return
+
+    if clean_text in ["ยกเลิกทั้งหมด", "ยกเลิกทุกใบ", "cancel all"]:
+        cnt = database.cancel_all_pending_scans(user_id)
+        if cnt > 0:
+            reply_line_message(reply_token, f"🗑️ ยกเลิกข้อมูลที่รอยืนยันทั้งหมด {cnt} ใบเรียบร้อยแล้วครับ")
+        else:
+            reply_line_message(reply_token, "⚠️ ไม่พบรายการที่รอยกเลิกในขณะนี้ครับ")
+        return
+
+    if clean_text in ["รอยืนยัน", "รายการค้าง", "ค้าง", "pending"]:
+        pendings = database.get_all_pending_scans(user_id)
+        if not pendings:
+            reply_line_message(reply_token, "✅ ไม่มีรายการที่รอกดยืนยันในขณะนี้ครับ ข้อมูลทั้งหมดได้รับการบันทึกเรียบร้อยแล้ว")
+            return
+        msg = f"📋 [รายการที่รอกดยืนยัน: {len(pendings)} ใบ]\n─────────────────────────\n"
+        for idx, p in enumerate(pendings, 1):
+            msg += f"{idx}. ใบที่: {p['sheet_id']} (รหัส ID: {p['id']})\n"
+        msg += "─────────────────────────\n💡 แตะปุ่มด้านล่างเพื่อยืนยันเฉพาะใบ หรือพิมพ์ 'ยืนยันทั้งหมด' เพื่อบันทึกทุกใบครับ"
+        q_items = [
+            ("✅ ยืนยันทั้งหมด", "ยืนยันทั้งหมด"),
+            ("❌ ยกเลิกทั้งหมด", "ยกเลิกทั้งหมด")
+        ]
+        for p in pendings[:3]:
+            q_items.append((f"✅ ยืนยัน {p['sheet_id']}", f"ยืนยัน {p['id']}"))
+        deliver_message(user_id, reply_token, msg, q_items)
+        return
+
     # 1. Confirm Pending Scan: "ยืนยัน 5" or "ยืนยัน"
     m_conf = re.match(r"^ยืนยัน(?:\s+(\d+))?$", clean_text)
     if m_conf:
@@ -773,21 +1080,31 @@ def handle_text_message(text: str, reply_token: str, user_id: str, is_owner: boo
         if scan_id_str:
             confirmed = database.confirm_pending_scan(int(scan_id_str))
         else:
-            scan = database.get_latest_pending_scan(user_id)
-            confirmed = database.confirm_pending_scan(scan["id"]) if scan else None
+            pendings = database.get_all_pending_scans(user_id)
+            if pendings:
+                confirmed = database.confirm_pending_scan(pendings[0]["id"])
+            else:
+                confirmed = None
             
         if confirmed:
             import gdrive_sync
             gdrive_sync.trigger_db_backup()
             active_p = database.get_active_period()
             p_name = active_p["name"] if active_p else "งวดปัจจุบัน"
+
+            remaining_pendings = database.get_all_pending_scans(user_id)
+            rem_hint = ""
+            if remaining_pendings:
+                rem_hint = f"\n💡 ยังมีอีก {len(remaining_pendings)} ใบที่รอยืนยัน (พิมพ์ 'ยืนยันทั้งหมด' เพื่อบันทึกทีเดียว)"
+
             msg = (
                 f"✅ ยืนยันบันทึกข้อมูลเรียบร้อยแล้วครับ!\n"
                 f"📋 [ใบที่: {confirmed['sheet_id']}]\n"
-                f"📌 ข้อมูลถูกบันทึกลงใน: {p_name}\n\n"
+                f"📌 ข้อมูลถูกบันทึกลงใน: {p_name}{rem_hint}\n\n"
                 f"🌐 ดูกระดานสรุปสด: {BASE_URL}"
             )
-            reply_line_message(reply_token, msg)
+            q_items = [("✅ ยืนยันทั้งหมด", "ยืนยันทั้งหมด")] if remaining_pendings else None
+            deliver_message(user_id, reply_token, msg, q_items)
         else:
             reply_line_message(reply_token, "⚠️ ไม่พบรายการที่รอกดยืนยัน หรือรายการนี้ได้รับการบันทึกไปแล้วครับ")
         return
@@ -803,7 +1120,9 @@ def handle_text_message(text: str, reply_token: str, user_id: str, is_owner: boo
             success = database.cancel_pending_scan(scan["id"]) if scan else False
             
         if success:
-            reply_line_message(reply_token, "🗑️ ยกเลิกข้อมูลเรียบร้อยครับ สามารถถ่ายรูปใหม่ได้เลยครับ")
+            rem = database.get_all_pending_scans(user_id)
+            rem_msg = f" (ยังมีรายการอื่นค้างอยู่ {len(rem)} ใบ)" if rem else ""
+            reply_line_message(reply_token, f"🗑️ ยกเลิกข้อมูลเรียบร้อยครับ{rem_msg}")
         else:
             reply_line_message(reply_token, "⚠️ ไม่พบรายการที่รอยกเลิกครับ")
         return
@@ -850,6 +1169,7 @@ def handle_text_message(text: str, reply_token: str, user_id: str, is_owner: boo
             "4️⃣ พิมพ์ 'เช็ค [เลข]' ➔ ค้นหาเลขชุดที่ 1 ในงวดนี้\n"
             "5️⃣ พิมพ์ 'รีเช็ค' ➔ ตรวจสอบลำดับแผ่นและแผ่นที่ตกหล่น\n"
             "6️⃣ พิมพ์ 'สถานะ' ➔ ดูยอดรวมและสถานะงวด\n"
+            "7️⃣ จัดการหลายรูป: 'รอยืนยัน', 'ยืนยันทั้งหมด', 'ยกเลิกทั้งหมด'\n"
         )
         if is_owner:
             help_msg += (
@@ -2173,10 +2493,18 @@ a.btn{{display:inline-block;padding:10px 18px;background:#2563eb;color:white;tex
                     msg = ev.get("message", {})
                     msg_type = msg.get("type")
                     if msg_type == "image":
+                        with _user_jobs_mutex:
+                            curr_jobs = _user_active_jobs.get(user_id, 0) + 1
+                            _user_active_jobs[user_id] = curr_jobs
+                            job_idx = curr_jobs
+
+                        if job_idx > 1:
+                            push_line_message(user_id, f"📥 ได้รับรูปที่ {job_idx} เรียบร้อยแล้วครับ!\n🔄 กำลังอ่านข้อมูลตามลำดับ กรุณารอสักครู่...")
+
                         # Process OCR asynchronously in background thread so webhook responds immediately
                         threading.Thread(
                             target=handle_image_message,
-                            args=(msg.get("id"), reply_token, user_id, user or {}),
+                            args=(msg.get("id"), reply_token, user_id, user or {}, job_idx),
                             daemon=True
                         ).start()
                     elif msg_type == "text":

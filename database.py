@@ -482,6 +482,88 @@ def cancel_pending_scan(scan_id: int) -> bool:
     conn.close()
     return success
 
+def get_next_available_sheet_id(period_id: int, worker_code: str) -> str:
+    """
+    Finds the next sequential sheet ID for a given worker in a period.
+    Scans both confirmed sheets and active pending_scans to avoid collisions.
+    """
+    init_db()
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    # 1. Look at confirmed sheets
+    cursor.execute("SELECT sheet_id FROM sheets WHERE period_id = ?", (period_id,))
+    existing_sheets = [r["sheet_id"] for r in cursor.fetchall()]
+    
+    # 2. Look at pending scans
+    cursor.execute("SELECT sheet_id FROM pending_scans WHERE period_id = ? AND status = 'PENDING'", (period_id,))
+    pending_sheets = [r["sheet_id"] for r in cursor.fetchall()]
+    
+    conn.close()
+    
+    all_sids = existing_sheets + pending_sheets
+    max_num = 0
+    pattern = re.compile(rf"^{re.escape(worker_code)}-(\d+)$", re.IGNORECASE)
+    
+    for sid in all_sids:
+        sid_str = str(sid or "").strip()
+        m = pattern.match(sid_str)
+        if m:
+            try:
+                num = int(m.group(1))
+                if num > max_num:
+                    max_num = num
+            except ValueError:
+                pass
+        elif sid_str.isdigit() and worker_code == "A":
+            try:
+                num = int(sid_str)
+                if num > max_num:
+                    max_num = num
+            except ValueError:
+                pass
+                
+    return f"{worker_code}-{max_num + 1}"
+
+def get_all_pending_scans(user_id: str) -> List[Dict]:
+    """Returns all currently pending scans for a user ordered from oldest to newest."""
+    init_db()
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+    SELECT * FROM pending_scans
+    WHERE user_id = ? AND status = 'PENDING'
+    ORDER BY id ASC
+    """, (user_id,))
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+def confirm_all_pending_scans(user_id: str) -> List[Dict]:
+    """Confirms all currently pending scans for a user. Returns list of confirmed sheet summaries."""
+    scans = get_all_pending_scans(user_id)
+    confirmed_list = []
+    for s in scans:
+        res = confirm_pending_scan(s["id"])
+        if res:
+            confirmed_list.append(res)
+    return confirmed_list
+
+def cancel_all_pending_scans(user_id: str) -> int:
+    """Cancels all currently pending scans for a user. Returns number of canceled scans."""
+    init_db()
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+    UPDATE pending_scans
+    SET status = 'CANCELED'
+    WHERE user_id = ? AND status = 'PENDING'
+    """, (user_id,))
+    count = cursor.rowcount
+    conn.commit()
+    conn.close()
+    return count
+
 # ==================== AUDIT REPORT & SEQUENCE CHECK ====================
 def run_audit_report(period_id: Optional[int] = None) -> Dict:
     init_db()
