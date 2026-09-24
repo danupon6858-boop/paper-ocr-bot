@@ -1452,12 +1452,11 @@ def render_edit_page(scan_id: int) -> str:
 """
     return html
 
-def render_html_dashboard(period_id: Optional[int] = None, scope: str = "period", active_tab: str = "live") -> str:
+def render_html_dashboard(period_id: Optional[int] = None, scope: str = "period", active_tab: str = "overview") -> str:
     all_periods = database.get_all_periods()
     active_period = database.get_active_period()
     latest_period = database.get_latest_period()
     
-    # Determine which period to view
     if period_id:
         selected_p = next((p for p in all_periods if p["id"] == period_id), latest_period)
     else:
@@ -1467,9 +1466,12 @@ def render_html_dashboard(period_id: Optional[int] = None, scope: str = "period"
     p_name = selected_p["name"] if selected_p else "งวดปัจจุบัน"
     p_is_open = (selected_p and selected_p.get("status") == "OPEN")
 
-    summary = database.get_daily_summary(p_id)
     financials = database.get_period_financials(p_id)
     total_inflow = financials.get("total_inflow", 0.0)
+    total_sheets = financials.get("total_sheets", 0)
+    total_employees = financials.get("total_employees", 0)
+    total_entries = financials.get("total_entries", 0)
+    
     conn = database.get_db_connection()
     cursor = conn.cursor()
     cursor.execute("""
@@ -1482,1057 +1484,1187 @@ def render_html_dashboard(period_id: Optional[int] = None, scope: str = "period"
     """, (p_id,))
     rows = cursor.fetchall()
 
-    # Recent sheet images
     cursor.execute("""
-    SELECT sheet_id, employee_name, worker_code, image_path, created_at
+    SELECT employee_name, worker_code, COUNT(id) as sheet_cnt
     FROM sheets
-    WHERE period_id = ? AND image_path != ''
-    ORDER BY id DESC LIMIT 12
+    WHERE period_id = ?
+    GROUP BY employee_name, worker_code
+    ORDER BY sheet_cnt DESC
     """, (p_id,))
-    recent_sheets = cursor.fetchall()
+    worker_counts = cursor.fetchall()
     conn.close()
 
-    # Data for Tab 1 (Live Board)
-    top_items = []
-    bot_items = []
-    topbot_items = []
+    prize_data = {}
+    p_winners = {"total_winners": 0, "total_payout": 0.0, "winners": []}
+    try:
+        import prize_service
+        prize_data = prize_service.fetch_latest_thai_lottery()
+        if prize_data.get("status") == "success":
+            p_winners = prize_service.check_period_winners(p_id, prize_data.get("top3", ""), prize_data.get("bottom2", ""))
+    except Exception as e:
+        prize_data = {"status": "pending", "prize1": "-", "top3": "-", "bottom2": "-", "date": p_name}
 
+    payout_total = p_winners.get("total_payout", 0.0)
+    net_margin = total_inflow - payout_total
+    margin_pct = round((net_margin / total_inflow * 100), 1) if total_inflow > 0 else 0.0
+    dealer_share_vol = round(total_inflow * 0.67, 2)
+    dealer_share_pct = 67 if total_inflow > 0 else 0
+    payout_share_pct = round((payout_total / total_inflow * 100), 1) if total_inflow > 0 else 0
+
+    # Period dropdown options
+    period_options_html = ""
+    for p in all_periods:
+        p_sel = 'selected' if p["id"] == p_id else ''
+        p_stat_text = "(เปิด)" if p.get("status") == "OPEN" else "(ปิด)"
+        period_options_html += f'<option value="{p["id"]}" {p_sel}>{html_lib.escape(p["name"])} {p_stat_text}</option>'
+
+    # Search items JSON
+    search_items = []
     for r in rows:
-        cat = r["category"]
         s1 = str(r["set1"] or "").strip()
         s2 = str(r["set2"] or "").strip()
         s3 = str(r["set3"] or "").strip()
-        s3_part = f"<span style='color:#d97706;font-weight:700'>{s3}</span> " if s3 else ""
-        s3_plain = f"{s3} " if s3 else ""
-        num_plain = f"{s1} = {s3_plain}{s2}"
-        
-        sheet_val = r["sheet_id"] or "-"
-        worker_val = f"{r['employee_name'] or 'พนักงาน'} ({r['worker_code'] or 'A'})"
-        time_val = str(r["created_at"] or "")[:16]
+        cat = r["category"] or ""
+        sheet = r["sheet_id"] or "-"
+        worker = f"{r['employee_name'] or 'พนักงาน'} ({r['worker_code'] or 'A'})"
         raw_img = str(r["image_path"] or "").strip()
-        if raw_img.startswith("uploads/"):
-            img_val = f"/{raw_img}"
-        elif raw_img.startswith("/uploads/"):
-            img_val = raw_img
-        else:
-            img_val = ""
+        img_val = f"/{raw_img}" if raw_img.startswith("uploads/") else (raw_img if raw_img.startswith("/uploads/") else "")
         box_val = r["box_2d"] or ""
         note_val = r["uncertain_note"] or ""
-        
-        brace_badge = ""
-        if note_val and "ปีกกา" in note_val:
-            brace_badge = f"<span class='brace-badge'>{html_lib.escape(note_val)}</span>"
-            
-        audit_btn = f"<span class='audit-inspect-hint'>🔍 ตรวจสอบ</span>" if img_val else ""
-        
-        cell_inner = f"""<div class="audit-item" data-num="{html_lib.escape(num_plain)}" data-sheet="{html_lib.escape(sheet_val)}" data-worker="{html_lib.escape(worker_val)}" data-cat="[{html_lib.escape(cat)}]" data-time="{html_lib.escape(time_val)}" data-img="{html_lib.escape(img_val)}" data-box="{html_lib.escape(box_val)}" data-note="{html_lib.escape(note_val)}" onclick="openAuditSpotlight(this)"><span class="audit-item-text"><strong>{s1}</strong> = {s3_part}{s2} {brace_badge}</span>{audit_btn}</div>"""
-        
-        if cat == "บน":
-            top_items.append(cell_inner)
-        elif cat == "ล่าง":
-            bot_items.append(cell_inner)
-        elif cat == "บนล่าง":
-            topbot_items.append(cell_inner)
+        time_val = str(r["created_at"] or "")[:16]
+        price_val = f"{s3} {s2}".strip() if s3 else s2
+        search_items.append({
+            "num": s1,
+            "cat": cat,
+            "price": price_val,
+            "sheet": sheet,
+            "worker": worker,
+            "img": img_val,
+            "box": box_val,
+            "note": note_val,
+            "time": time_val
+        })
+    search_json = json.dumps(search_items, ensure_ascii=False)
 
-    max_len = max(len(top_items), len(bot_items), len(topbot_items), 1)
-
+    # Table rows HTML
     table_rows_html = ""
     if rows:
-        for i in range(max_len):
-            row_num = i + 1
-            top_v = top_items[i] if i < len(top_items) else ""
-            bot_v = bot_items[i] if i < len(bot_items) else ""
-            topbot_v = topbot_items[i] if i < len(topbot_items) else ""
+        for idx, r in enumerate(rows, 1):
+            cat = r["category"] or ""
+            s1 = str(r["set1"] or "").strip()
+            s2 = str(r["set2"] or "").strip()
+            s3 = str(r["set3"] or "").strip()
+            s3_part = f"<span class='text-amber-600 font-bold font-sans'>{html_lib.escape(s3)}</span> " if s3 else ""
+            num_plain = f"{s1} = {s3 + ' ' if s3 else ''}{s2}"
+            sheet_val = r["sheet_id"] or "-"
+            worker_val = f"{r['employee_name'] or 'พนักงาน'} ({r['worker_code'] or 'A'})"
+            time_val = str(r["created_at"] or "")[:16]
+            raw_img = str(r["image_path"] or "").strip()
+            img_val = f"/{raw_img}" if raw_img.startswith("uploads/") else (raw_img if raw_img.startswith("/uploads/") else "")
+            box_val = r["box_2d"] or ""
+            note_val = r["uncertain_note"] or ""
+            
+            brace_badge = ""
+            if note_val and "ปีกกา" in note_val:
+                brace_badge = f"<span class='text-[10px] font-medium text-[#A35C2B] bg-[#FDF0E7] border border-[#F6DCD0] px-2 py-0.5 rounded-md font-sans'>{html_lib.escape(note_val)}</span>"
+                
+            cat_badge_class = "text-[#2D6A4F]" if cat == "บน" else ("text-[#6B5384]" if cat == "ล่าง" else "text-[#A35C2B]")
+            
             table_rows_html += f"""
-            <tr class="entry-row">
-                <td style="color:#64748b; font-weight:600; text-align:center">{row_num}</td>
-                <td class="col-val" style="padding:4px 8px;">{top_v}</td>
-                <td class="col-val" style="padding:4px 8px;">{bot_v}</td>
-                <td class="col-val" style="padding:4px 8px;">{topbot_v}</td>
-            </tr>
-            """
-    else:
-        table_rows_html = '<tr><td colspan="4" style="text-align:center; color:#94a3b8; padding:30px;">ยังไม่มีข้อมูลในงวดนี้</td></tr>'
-
-    # Recent sheet photos HTML
-    sheet_photos_html = ""
-    if recent_sheets:
-        badges = []
-        for s in recent_sheets:
-            sid = s["sheet_id"]
-            raw_simg = str(s["image_path"] or "").strip()
-            if raw_simg.startswith("uploads/"):
-                img_url = f"/{raw_simg}"
-            elif raw_simg.startswith("/uploads/"):
-                img_url = raw_simg
-            else:
-                img_url = ""
-            if not img_url:
-                continue
-            w_code = s["worker_code"] or "A"
-            badges.append(f'<a href="{img_url}" target="_blank" class="sheet-photo-badge">📷 {sid} ({w_code})</a>')
-        if badges:
-            sheet_photos_html = f"""
-            <div class="sheet-photos-bar">
-                <span style="font-size:13px; font-weight:700; color:#475569;">🖼️ รูปกระดาษจริง ({len(badges)} ใบล่าสุด):</span>
-                <div class="sheet-photos-list">{' '.join(badges)}</div>
-            </div>
-            """
-
-    # Data for Tab 2 (Set 1 Insights)
-    is_all_time = (scope == "all")
-    target_pid = None if is_all_time else p_id
-    s1_stats = database.get_set1_analytics(target_pid)
-    tot_s1 = s1_stats["total_entries"] or 1
-
-    cnt2 = s1_stats["length_counts"].get("2", 0)
-    cnt3 = s1_stats["length_counts"].get("3", 0)
-    cnt4 = s1_stats["length_counts"].get("4", 0)
-    pct2 = round(cnt2 / tot_s1 * 100, 1)
-    pct3 = round(cnt3 / tot_s1 * 100, 1)
-    pct4 = round(cnt4 / tot_s1 * 100, 1)
-
-    pat_counts = s1_stats["pattern_counts"]
-    
-    top20_html = ""
-    for idx, item in enumerate(s1_stats["top_by_freq"], 1):
-        num = item["set1"]
-        pat = database.classify_number_pattern(num)
-        cnt = item["count"]
-        vol_str = f"{int(item['volume']):,}" if item["volume"] > 0 else "-"
-        top20_html += f"""
-        <tr>
-            <td style="text-align:center; font-weight:700; color:#64748b;">#{idx}</td>
-            <td><strong style="font-size:18px; color:#0f172a; font-family:monospace;">{num}</strong></td>
-            <td><span class="badge-pat">{pat}</span></td>
-            <td style="text-align:center; font-weight:800; color:#2563eb;">{cnt} ครั้ง</td>
-            <td style="text-align:center; color:#1d4ed8; font-weight:600;">{item['top']}</td>
-            <td style="text-align:center; color:#dc2626; font-weight:600;">{item['bottom']}</td>
-            <td style="text-align:center; color:#7c3aed; font-weight:600;">{item['top_bottom']}</td>
-            <td style="text-align:right; font-weight:700; color:#059669;">{vol_str}</td>
-        </tr>
-        """
-    if not top20_html:
-        top20_html = "<tr><td colspan='8' style='text-align:center; color:#94a3b8; padding:20px;'>ยังไม่มีข้อมูลตัวเลข</td></tr>"
-
-    # Data for Tab 3 (AI Feedback & Accuracy)
-    ai_metrics = database.get_ai_feedback_metrics(target_pid)
-    import ai_training_pipeline
-    ai_readiness = ai_training_pipeline.get_dataset_readiness(target_pid)
-    
-    ai_training_card_html = f"""
-    <div style="background:white; border-radius:14px; border:1px solid #e2e8f0; padding:18px 20px; margin-bottom:20px; box-shadow:0 1px 3px rgba(0,0,0,0.05);">
-        <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px; margin-bottom:12px;">
-            <div>
-                <div style="font-size:17px; font-weight:800; color:#0f172a; display:flex; align-items:center; gap:8px;">
-                    <span>🧠 ระบบเตรียมชุดข้อมูลฝึกฝนโมเดล AI (VLM Fine-Tuning Pipeline)</span>
-                </div>
-                <div style="font-size:13px; color:#64748b; margin-top:2px;">รวบรวมภาพถ่ายโพยจริงพร้อมผลเฉลยที่ตรวจสอบแล้ว นำไป Fine-Tune โมเดลตัวเบา <strong>Qwen2-VL-2B</strong> บน Google Colab ฟรี</div>
-            </div>
-            <span style="font-size:13px; font-weight:700; padding:6px 12px; border-radius:8px; background:#f1f5f9; color:#334155;">{ai_readiness['status_badge']}</span>
-        </div>
-        
-        <div style="background:#f8fafc; border:1px solid #e2e8f0; border-radius:10px; padding:14px; margin-bottom:14px;">
-            <div style="display:flex; justify-content:space-between; font-size:13px; font-weight:700; color:#475569; margin-bottom:6px;">
-                <span>ความพร้อมของชุดข้อมูล ({ai_readiness['period_name']})</span>
-                <span style="color:#2563eb;">{ai_readiness['total_sheets']} / {ai_readiness['min_recommended']} ใบ ({ai_readiness['readiness_pct']}%)</span>
-            </div>
-            <div style="background:#e2e8f0; border-radius:999px; height:10px; overflow:hidden;">
-                <div style="background:linear-gradient(90deg, #3b82f6, #10b981); height:100%; width:{ai_readiness['readiness_pct']}%; transition:width 0.5s;"></div>
-            </div>
-            <div style="font-size:12px; color:#64748b; margin-top:8px;">
-                ℹ️ {ai_readiness['status_desc']} (มีข้อมูลตัวเลขเฉลยแล้ว {ai_readiness['total_entries']} รายการ)
-            </div>
-        </div>
-
-        <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
-            <a href="/export-ai-bundle?period_id={p_id}" style="background:#2563eb; color:white; padding:10px 18px; border-radius:10px; font-weight:700; text-decoration:none; font-size:13px; display:inline-flex; align-items:center; gap:6px; box-shadow:0 2px 4px rgba(37,99,235,0.2);" download>
-                📦 ดาวน์โหลดชุดข้อมูลพร้อมเทรน (.ZIP)
-            </a>
-            <a href="/colab-notebook" style="background:#475569; color:white; padding:10px 18px; border-radius:10px; font-weight:700; text-decoration:none; font-size:13px; display:inline-flex; align-items:center; gap:6px;" download>
-                📓 ดาวน์โหลด Colab Notebook (.ipynb)
-            </a>
-            <a href="https://colab.research.google.com" target="_blank" style="background:#f59e0b; color:white; padding:10px 18px; border-radius:10px; font-weight:700; text-decoration:none; font-size:13px; display:inline-flex; align-items:center; gap:6px;">
-                🚀 เปิด Google Colab
-            </a>
-        </div>
-    </div>
-    """
-    
-    misread_html = ""
-    for pair, count in ai_metrics["top_misread"]:
-        misread_html += f"""
-        <tr>
-            <td><strong style="color:#dc2626; font-size:16px;">{pair}</strong></td>
-            <td style="text-align:center; font-weight:800; color:#0f172a;">{count} ครั้ง</td>
-        </tr>
-        """
-    if not misread_html:
-        misread_html = "<tr><td colspan='2' style='text-align:center; color:#16a34a; padding:20px;'>✅ ยอดเยี่ยม! ยังไม่พบประวัติการอ่านผิดซ้ำในชุดข้อมูลนี้</td></tr>"
-
-    corr_html = ""
-    for c in ai_metrics["recent_corrections"][:30]:
-        t_str = c["created_at"][11:16] if len(c.get("created_at", "")) >= 16 else ""
-        sid = c["sheet_id"] or "-"
-        w_code = c["worker_code"] or "A"
-        act = c["action_type"]
-        act_badge = '<span class="badge-edit">แก้ไข</span>' if act == 'SINGLE_EDIT' else ('<span class="badge-del">ลบออก</span>' if act == 'DELETE' else '<span class="badge-bulk">แก้ทั้งใบ</span>')
-        old_val = c.get("old_set1", "") or "-"
-        new_val = c.get("new_set1", "") or "-"
-        detail = f"{old_val} ➔ <strong>{new_val}</strong>" if act == 'SINGLE_EDIT' else (f"ลบเลข {old_val}" if act == 'DELETE' else "แก้ข้อมูลตาราง")
-        corr_html += f"""
-        <tr>
-            <td style="color:#64748b; font-size:12px;">{t_str}</td>
-            <td><strong>{sid}</strong></td>
-            <td style="text-align:center;"><span class="badge-worker">{w_code}</span></td>
-            <td style="text-align:center;">{act_badge}</td>
-            <td>{detail}</td>
-            <td style="color:#64748b; font-size:12px;">{c.get('note', '')}</td>
-        </tr>
-        """
-    if not corr_html:
-        corr_html = "<tr><td colspan='6' style='text-align:center; color:#94a3b8; padding:20px;'>ยังไม่มีบันทึกการแก้ไข</td></tr>"
-
-    # Data for Tab 4 (Staff & Peak Hours)
-    staff_metrics = database.get_staff_and_peak_metrics(target_pid)
-    
-    hourly_bars_html = ""
-    max_hour_count = max(staff_metrics["hourly"].values(), default=1) or 1
-    for h_int in range(6, 23):
-        h_str = f"{h_int:02d}"
-        cnt = staff_metrics["hourly"].get(h_str, 0)
-        h_pct = int(cnt / max_hour_count * 100) if max_hour_count > 0 else 0
-        hourly_bars_html += f"""
-        <div class="bar-col">
-            <div class="bar-val">{cnt if cnt > 0 else ''}</div>
-            <div class="bar-fill" style="height: {max(h_pct, 4)}%;"></div>
-            <div class="bar-label">{h_str}</div>
-        </div>
-        """
-
-    workers_html = ""
-    for w in staff_metrics["workers"]:
-        workers_html += f"""
-        <tr>
-            <td style="text-align:center;"><strong style="color:#2563eb; font-size:16px;">{w['worker_code']}</strong></td>
-            <td><strong>{w['employee_name']}</strong></td>
-            <td style="text-align:right; font-weight:700; color:#0f172a;">{w['total_sheets']} แผ่น</td>
-        </tr>
-        """
-    if not workers_html:
-        workers_html = "<tr><td colspan='3' style='text-align:center; color:#94a3b8; padding:20px;'>ยังไม่มีข้อมูลพนักงานส่งงาน</td></tr>"
-
-    # User Approval & Period controls HTML
-    pending_users = database.get_pending_users()
-    pending_users_html = ""
-    if pending_users:
-        next_code = database.get_next_worker_code()
-        cards_html = ""
-        for pu in pending_users:
-            cards_html += f"""
-            <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px; background:white; padding:10px 14px; border-radius:8px; border:1px solid #fed7aa; margin-top:8px;">
+            <div class="row-entry bg-[#FFFFFF] border border-[#EDE7DD] hover:border-[#D4CBBD] rounded-2xl p-3 flex items-center justify-between cursor-pointer shadow-xs transition-colors" data-cat="{html_lib.escape(cat)}" data-num="{html_lib.escape(num_plain)}" data-sheet="{html_lib.escape(sheet_val)}" data-worker="{html_lib.escape(worker_val)}" data-catname="[{html_lib.escape(cat)}]" data-time="{html_lib.escape(time_val)}" data-img="{html_lib.escape(img_val)}" data-box="{html_lib.escape(box_val)}" data-note="{html_lib.escape(note_val)}" onclick="openAuditSpotlight(this)">
+              <div class="flex items-center gap-3">
+                <span class="w-6 text-xs text-[#8A8279] font-mono text-center">{idx}</span>
                 <div>
-                    <strong style="color:#0f172a;">👤 {pu['display_name']}</strong> <span style="color:#64748b; font-size:12px;">(ID: {pu['user_id'][:10]}...)</span>
+                  <div class="flex items-baseline gap-2">
+                    <span class="text-base font-bold text-[#2A2421] font-mono">{html_lib.escape(s1)}</span>
+                    <span class="text-xs text-[#A8A095]">=</span>
+                    <span class="text-sm font-bold text-[#2D6A4F] font-mono">{s3_part}{html_lib.escape(s2)}</span>
+                    {brace_badge}
+                  </div>
+                  <div class="flex items-center gap-2 mt-0.5 text-[11px] text-[#7D756D]">
+                    <span class="{cat_badge_class} font-medium">[{html_lib.escape(cat)}]</span>
+                    <span>ใบที่ {html_lib.escape(sheet_val)} ({html_lib.escape(worker_val)})</span>
+                  </div>
                 </div>
-                <div style="display:flex; gap:6px; align-items:center;">
-                    <form method="POST" action="/api/user/approve" style="margin:0; display:flex; gap:6px; align-items:center;">
-                        <input type="hidden" name="user_id" value="{pu['user_id']}">
-                        <label style="font-size:12px; font-weight:bold; color:#475569;">รหัส:</label>
-                        <input type="text" name="worker_code" value="{next_code}" style="width:45px; text-align:center; padding:5px; font-weight:bold; border:1px solid #cbd5e1; border-radius:6px;">
-                        <button type="submit" class="btn-toggle" style="background:#16a34a; color:white; padding:6px 12px; font-size:13px; cursor:pointer;">✅ อนุมัติ</button>
-                    </form>
-                    <form method="POST" action="/api/user/block" style="margin:0;">
-                        <input type="hidden" name="user_id" value="{pu['user_id']}">
-                        <button type="submit" class="btn-toggle" style="background:#dc2626; color:white; padding:6px 12px; font-size:13px; cursor:pointer;" onclick="return confirm('ยืนยันบล็อกผู้ใช้นี้?')">⛔️ บล็อก</button>
-                    </form>
-                </div>
+              </div>
+              <span class="text-xs font-medium text-[#5C544C] bg-[#F5F2EB] border border-[#DFD8CC] px-2.5 py-1 rounded-xl">ส่องภาพ</span>
             </div>
             """
-        pending_users_html = f"""
-        <div style="background:#fff7ed; border:1px solid #ffedd5; border-radius:12px; padding:14px; margin-bottom:16px;">
-            <div style="font-weight:bold; color:#c2410c; font-size:15px;">🔔 มีผู้ขอเข้าใช้งานรอการอนุมัติ ({len(pending_users)} ท่าน)</div>
-            {cards_html}
-        </div>
-        """
-
-    if p_is_open:
-        period_control_html = f"""
-        <div class="period-banner banner-open">
-            <div>
-                <span class="status-indicator dot-open"></span>
-                <strong>🟢 สถานะ: กำลังเปิดรับข้อมูล</strong> — {p_name}
-            </div>
-            <form method="POST" action="/api/period/toggle" style="margin:0;">
-                <input type="hidden" name="action" value="close">
-                <button type="submit" class="btn-toggle btn-close-period" onclick="return confirm('คุณต้องการปิดงวดนี้ใช่หรือไม่? (หลังจากปิด ระบบจะไม่รับรูปอีก)')">🔴 ปิดงวดนี้</button>
-            </form>
-        </div>
-        """
     else:
-        period_control_html = f"""
-        <div class="period-banner banner-closed">
-            <div>
-                <span class="status-indicator dot-closed"></span>
-                <strong>🔴 สถานะ: ปิดรับข้อมูลชั่วคราว</strong> — {p_name}
-            </div>
-            <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
-                <form method="POST" action="/api/period/toggle" style="margin:0;">
-                    <input type="hidden" name="action" value="reopen">
-                    <button type="submit" class="btn-toggle btn-open-period">🟢 เปิดงวดเดิมต่อ (รับข้อมูลต่อ)</button>
-                </form>
-                <form method="POST" action="/api/period/toggle" style="margin:0;" onsubmit="let name = prompt('กรุณาตั้งชื่องวดใหม่ (เว้นว่างไว้เพื่อใช้วันที่วันนี้):'); if(name === null) return false; document.getElementById('new_p_name').value = name;">
-                    <input type="hidden" name="action" value="new">
-                    <input type="hidden" name="period_name" id="new_p_name" value="">
-                    <button type="submit" class="btn-toggle" style="background:#2563eb; color:white;">➕ เริ่มเปิดงวดใหม่</button>
-                </form>
-            </div>
-        </div>
-        """
+        table_rows_html = '<div class="text-center py-10 text-[#7D756D] bg-[#FFFFFF] rounded-2xl border border-[#EDE7DD] text-xs">ยังไม่มีข้อมูลโพยในงวดนี้</div>'
 
-    # Period Dropdown Options
-    period_options_html = ""
-    for p in all_periods:
-        sel = "selected" if p["id"] == p_id else ""
-        st_tag = " (เปิด)" if p["status"] == "OPEN" else " (ปิดแล้ว)"
-        period_options_html += f"<option value='{p['id']}' {sel}>{p['name']}{st_tag}</option>"
+    # Top popular numbers HTML
+    top_numbers_html = ""
+    top_num_list = financials.get("top_numbers", [])
+    if top_num_list:
+        for tn in top_num_list[:4]:
+            tnum = html_lib.escape(str(tn["number"]))
+            tvol = f"{int(tn['volume']):,}฿" if tn["volume"] > 0 else f"{tn['count']} ครั้ง"
+            top_numbers_html += f"""
+            <div class="bg-[#F9F6F0] hover:bg-[#F2ECE2] cursor-pointer p-2 rounded-2xl border border-[#E8E1D5] transition-colors" onclick="quickSearchNum('{tnum}')">
+              <div class="text-base font-bold text-[#2A2421] font-mono">{tnum}</div>
+              <div class="text-[10px] text-[#2D6A4F] font-mono font-semibold">{tvol}</div>
+            </div>
+            """
+    else:
+        top_numbers_html = '<div class="col-span-4 text-center py-3 text-xs text-[#7D756D]">- ยังไม่มีสถิติ -</div>'
+
+    # Worker summary HTML
+    worker_rows_html = ""
+    if worker_counts:
+        for wc in worker_counts:
+            w_name = html_lib.escape(str(wc["employee_name"] or "พนักงาน"))
+            w_code = html_lib.escape(str(wc["worker_code"] or "A"))
+            w_cnt = int(wc["sheet_cnt"] or 0)
+            worker_rows_html += f"""
+            <div class="flex items-center justify-between p-2.5 rounded-2xl bg-[#F9F6F0] border border-[#EAE3D8]">
+              <span>{w_name} <span class="text-[#2D6A4F] font-mono font-semibold">({w_code})</span></span>
+              <span class="font-mono text-[#2A2421] font-bold">{w_cnt} ใบ</span>
+            </div>
+            """
+    else:
+        worker_rows_html = '<div class="text-center py-2 text-xs text-[#7D756D]">- ยังไม่มีข้อมูล -</div>'
+
+    # Winners list HTML
+    winners_rows_html = ""
+    w_list = p_winners.get("winners", [])
+    if w_list:
+        for idx, w in enumerate(w_list, 1):
+            w_num = html_lib.escape(str(w.get("number", "")))
+            w_type = html_lib.escape(str(w.get("match_type", "")))
+            w_pay = f"{int(w.get('payout', 0)):,} ฿"
+            w_sheet = html_lib.escape(str(w.get("sheet_id", "-")))
+            w_emp = html_lib.escape(str(w.get("employee_name", "พนักงาน")))
+            w_img = html_lib.escape(str(w.get("image_path", "")))
+            w_img_url = f"/{w_img}" if w_img.startswith("uploads/") else (w_img if w_img.startswith("/uploads/") else "")
+            
+            winners_rows_html += f"""
+            <div class="p-2.5 rounded-2xl bg-[#FFFFFF] border border-[#EDE7DD] flex items-center justify-between text-xs">
+              <div>
+                <div class="flex items-baseline gap-2 font-mono">
+                  <span class="font-bold text-[#2A2421] text-sm">{w_num}</span>
+                  <span class="text-[10px] text-[#2D6A4F] bg-[#E8F3EB] px-2 py-0.5 rounded-full">{w_type}</span>
+                  <span class="font-bold text-[#A84357]">{w_pay}</span>
+                </div>
+                <div class="text-[10px] text-[#7D756D] mt-0.5">
+                  ใบที่ {w_sheet} ({w_emp})
+                </div>
+              </div>
+              {f'<a href="{w_img_url}" target="_blank" class="px-2.5 py-1 text-xs text-[#5C544C] bg-[#F5F2EB] border border-[#DFD8CC] rounded-xl text-decoration-none">ดูรูป</a>' if w_img_url else ''}
+            </div>
+            """
+    else:
+        winners_rows_html = '<div class="text-center py-3 text-xs text-[#7D756D]">ยังไม่มีรายการถูกรางวัลในงวดนี้</div>'
+
+    status_pill_html = '<span class="inline-flex items-center gap-1.5 text-[11px] font-semibold px-2.5 py-1 rounded-full bg-[#E8F3EB] text-[#2D6A4F] border border-[#CFE4D4]"><span class="w-1.5 h-1.5 rounded-full bg-[#3A7D58]"></span>เปิดรับยอด</span>' if p_is_open else '<span class="inline-flex items-center gap-1.5 text-[11px] font-semibold px-2.5 py-1 rounded-full bg-[#FCEEEF] text-[#A84357] border border-[#F7D5D9]"><span class="w-1.5 h-1.5 rounded-full bg-[#A84357]"></span>ปิดงวดแล้ว</span>'
 
     html = f"""<!DOCTYPE html>
 <html lang="th">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ระบบจัดการตัวเลข & มอนิเตอร์ AI</title>
-    <style>
-        * {{ box-sizing: border-box; font-family: -apple-system, BlinkMacSystemFont, "Prompt", "Segoe UI", Roboto, sans-serif; }}
-        body {{ background: #f8fafc; color: #1e293b; margin: 0; padding: 16px; }}
-        .header {{ display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; margin-bottom: 16px; }}
-        .title {{ font-size: 22px; font-weight: 800; color: #0f172a; margin: 0; }}
-        
-        .tab-nav {{ display: flex; gap: 8px; border-bottom: 2px solid #e2e8f0; margin-bottom: 20px; overflow-x: auto; padding-bottom: 2px; }}
-        .tab-btn {{ padding: 10px 18px; border: none; background: none; font-size: 15px; font-weight: 700; color: #64748b; cursor: pointer; border-radius: 8px 8px 0 0; white-space: nowrap; transition: all 0.15s; }}
-        .tab-btn:hover {{ color: #2563eb; background: #eff6ff; }}
-        .tab-btn.active {{ color: #2563eb; border-bottom: 3px solid #2563eb; background: #eff6ff; }}
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>ระบบจัดการโพยหวย - {html_lib.escape(p_name)}</title>
+  <script src="https://www.gstatic.com/antigravity/web/dev/tailwindcss.min.js"></script>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Prompt:wght@300;400;500;600;700&family=JetBrains+Mono:wght@500;600;700;800&display=swap');
+    
+    * {{
+      font-family: 'Prompt', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      -webkit-tap-highlight-color: transparent;
+    }}
+    
+    .font-mono {{
+      font-family: 'JetBrains Mono', monospace;
+      font-feature-settings: 'tnum' on, 'lnum' on;
+    }}
 
-        .tab-content {{ display: none; }}
-        .tab-content.active {{ display: block; }}
+    ::-webkit-scrollbar {{
+      width: 4px;
+      height: 4px;
+    }}
+    ::-webkit-scrollbar-track {{
+      background: transparent;
+    }}
+    ::-webkit-scrollbar-thumb {{
+      background: #D8D0C3;
+      border-radius: 4px;
+    }}
 
-        .period-banner {{ padding: 14px 18px; border-radius: 12px; margin-bottom: 16px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; }}
-        .banner-open {{ background: #dcfce7; border: 1px solid #bbf7d0; color: #166534; }}
-        .banner-closed {{ background: #fee2e2; border: 1px solid #fecaca; color: #991b1b; }}
-        .status-indicator {{ width: 10px; height: 10px; border-radius: 50%; display: inline-block; margin-right: 6px; }}
-        .dot-open {{ background: #22c55e; }}
-        .dot-closed {{ background: #ef4444; }}
-        .btn-toggle {{ padding: 9px 16px; border-radius: 8px; font-weight: 700; font-size: 14px; border: none; cursor: pointer; }}
-        .btn-close-period {{ background: #dc2626; color: white; }}
-        .btn-open-period {{ background: #16a34a; color: white; }}
+    .phone-frame {{
+      max-width: 430px;
+      margin: 0 auto;
+      border-radius: 44px;
+      box-shadow: 0 25px 60px -15px rgba(80, 70, 60, 0.22), 0 0 0 1px #DFD7CB;
+      overflow: hidden;
+      min-height: 870px;
+      position: relative;
+      background: #F9F6F0;
+    }}
 
-        .toolbar {{ display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 16px; }}
-        .period-select {{ padding: 10px 14px; border: 1px solid #cbd5e1; border-radius: 10px; font-size: 14px; font-weight: 600; background: white; }}
-
-        .stats-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 12px; margin-bottom: 20px; }}
-        .stat-card {{ background: white; border: 1px solid #e2e8f0; border-radius: 12px; padding: 14px; text-align: center; box-shadow: 0 1px 3px rgba(0,0,0,0.05); }}
-        .stat-num {{ font-size: 24px; font-weight: 800; color: #0f172a; margin-top: 4px; }}
-        .stat-label {{ font-size: 12px; color: #64748b; font-weight: 600; text-transform: uppercase; }}
-
-        .search-box {{ margin-bottom: 16px; display: flex; gap: 10px; }}
-        .search-input {{ flex: 1; padding: 12px 16px; border: 1px solid #cbd5e1; border-radius: 10px; font-size: 15px; outline: none; background: white; }}
-        .search-input:focus {{ border-color: #2563eb; box-shadow: 0 0 0 3px rgba(37,99,235,0.1); }}
-
-        .btn-export {{ background: #059669; color: white; border: none; padding: 10px 16px; border-radius: 10px; font-weight: 600; text-decoration: none; font-size: 13px; display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }}
-        .btn-dataset {{ background: #4f46e5; color: white; border: none; padding: 10px 16px; border-radius: 10px; font-weight: 600; text-decoration: none; font-size: 13px; display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }}
-
-        .table-container {{ background: white; border: 1px solid #e2e8f0; border-radius: 12px; overflow-x: auto; box-shadow: 0 1px 3px rgba(0,0,0,0.05); margin-bottom: 20px; }}
-        table {{ width: 100%; border-collapse: collapse; text-align: left; font-size: 14px; }}
-        th {{ background: #f1f5f9; padding: 12px 16px; font-weight: 800; color: #1e293b; border-bottom: 2px solid #cbd5e1; }}
-        td {{ padding: 10px 16px; border-bottom: 1px solid #f1f5f9; }}
-        tr:hover {{ background: #f8fafc; }}
-
-        .sheet-photos-bar {{ background: white; padding: 12px 16px; border-radius: 12px; border: 1px solid #e2e8f0; margin-bottom: 16px; }}
-        .sheet-photos-list {{ display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }}
-        .sheet-photo-badge {{ background: #eff6ff; color: #1d4ed8; text-decoration: none; font-size: 12px; font-weight: 700; padding: 5px 10px; border-radius: 6px; border: 1px solid #bfdbfe; transition: all 0.15s; }}
-        .sheet-photo-badge:hover {{ background: #2563eb; color: white; }}
-
-        .scope-pills {{ display: inline-flex; background: #e2e8f0; padding: 4px; border-radius: 10px; gap: 4px; margin-bottom: 16px; }}
-        .scope-pill {{ padding: 6px 14px; border-radius: 8px; font-size: 13px; font-weight: 700; text-decoration: none; color: #64748b; }}
-        .scope-pill.active {{ background: white; color: #0f172a; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }}
-
-        .badge-pat {{ background: #f3e8ff; color: #7e22ce; font-size: 11px; font-weight: 700; padding: 3px 8px; border-radius: 6px; }}
-        .badge-edit {{ background: #fef3c7; color: #b45309; font-size: 11px; font-weight: 700; padding: 3px 8px; border-radius: 6px; }}
-        .badge-del {{ background: #fee2e2; color: #b91c1c; font-size: 11px; font-weight: 700; padding: 3px 8px; border-radius: 6px; }}
-        .badge-bulk {{ background: #e0e7ff; color: #3730a3; font-size: 11px; font-weight: 700; padding: 3px 8px; border-radius: 6px; }}
-        .badge-worker {{ background: #e2e8f0; color: #334155; font-size: 11px; font-weight: 700; padding: 3px 8px; border-radius: 6px; }}
-
-        .bars-container {{ display: flex; align-items: flex-end; gap: 8px; height: 160px; padding: 16px 8px 8px 8px; background: white; border-radius: 12px; border: 1px solid #e2e8f0; overflow-x: auto; margin-bottom: 20px; }}
-        .bar-col {{ flex: 1; min-width: 28px; display: flex; flex-direction: column; align-items: center; height: 100%; justify-content: flex-end; }}
-        .bar-fill {{ width: 100%; background: linear-gradient(180deg, #3b82f6 0%, #1d4ed8 100%); border-radius: 4px 4px 0 0; min-height: 4px; transition: height 0.3s; }}
-        .bar-val {{ font-size: 10px; font-weight: 700; color: #64748b; margin-bottom: 4px; }}
-        .bar-label {{ font-size: 11px; color: #94a3b8; margin-top: 6px; }}
-
-        .audit-item {{ display: flex; justify-content: space-between; align-items: center; padding: 4px 8px; border-radius: 6px; cursor: pointer; transition: all 0.15s ease-in-out; }}
-        .audit-item:hover {{ background: #eff6ff; box-shadow: 0 0 0 1px #bfdbfe; transform: translateY(-1px); }}
-        .audit-item-text {{ font-size: 14px; }}
-        .audit-inspect-hint {{ opacity: 0; font-size: 11px; color: #2563eb; background: #dbeafe; padding: 2px 6px; border-radius: 4px; font-weight: 700; transition: opacity 0.15s; white-space: nowrap; margin-left: 6px; }}
-        .audit-item:hover .audit-inspect-hint {{ opacity: 1; }}
-        .brace-badge {{ background: #f3e8ff; color: #7e22ce; border: 1px solid #d8b4fe; padding: 1px 6px; border-radius: 4px; font-size: 11px; font-weight: 600; margin-left: 4px; }}
-
-        .audit-modal-backdrop {{ position: fixed; inset: 0; background: rgba(0, 0, 0, 0.8); backdrop-filter: blur(4px); z-index: 99999; display: none; align-items: center; justify-content: center; padding: 16px; }}
-        .audit-modal-card {{ background: #0f172a; color: white; border: 1px solid #334155; border-radius: 16px; max-width: 680px; width: 100%; max-height: 92vh; overflow-y: auto; box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.7); display: flex; flex-direction: column; }}
-        .audit-modal-header {{ background: linear-gradient(90deg, #1e293b 0%, #0f172a 100%); padding: 16px 20px; border-bottom: 1px solid #334155; display: flex; justify-content: space-between; align-items: center; }}
-        .audit-modal-close {{ background: #334155; border: none; color: #94a3b8; width: 32px; height: 32px; border-radius: 8px; font-size: 16px; cursor: pointer; font-weight: bold; transition: all 0.15s; }}
-        .audit-modal-close:hover {{ background: #475569; color: white; }}
-        .audit-num-pill {{ background: #0284c7; color: white; padding: 2px 10px; border-radius: 6px; font-family: monospace; font-weight: 800; font-size: 14px; }}
-        .audit-modal-body {{ padding: 16px 20px; }}
-        .audit-meta-grid {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 12px; }}
-        @media (max-width: 540px) {{ .audit-meta-grid {{ grid-template-columns: repeat(2, 1fr); }} }}
-        .audit-meta-cell {{ background: #1e293b; border: 1px solid #334155; border-radius: 10px; padding: 8px 12px; }}
-        .audit-meta-lbl {{ font-size: 11px; color: #94a3b8; font-weight: 600; }}
-        .audit-meta-val {{ font-size: 14px; font-weight: 800; margin-top: 2px; }}
-        .audit-brace-box {{ background: rgba(88, 28, 135, 0.3); border: 1px solid rgba(147, 51, 234, 0.4); border-radius: 10px; padding: 10px 14px; display: flex; gap: 10px; align-items: flex-start; margin-bottom: 12px; }}
-        .audit-viewport {{ height: 360px; background: #000; border-radius: 12px; border: 1px solid #334155; overflow: hidden; position: relative; cursor: grab; user-select: none; }}
-        .audit-zoom-container {{ position: absolute; top: 0; left: 0; transform-origin: 0 0; transition: transform 0.1s ease-out; }}
-        .audit-sheet-img {{ display: block; max-width: 600px; width: 600px; height: auto; pointer-events: none; }}
-        .spotlight-ring {{ position: absolute; border: 3px solid #38bdf8; border-radius: 6px; box-shadow: 0 0 0 4px rgba(56, 189, 248, 0.4), 0 0 20px rgba(56, 189, 248, 0.6); pointer-events: none; animation: pulse-ring 1.5s infinite; }}
-        @keyframes pulse-ring {{
-            0% {{ box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.4), 0 0 10px rgba(56, 189, 248, 0.4); }}
-            50% {{ box-shadow: 0 0 0 8px rgba(56, 189, 248, 0.8), 0 0 25px rgba(56, 189, 248, 0.9); }}
-            100% {{ box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.4), 0 0 10px rgba(56, 189, 248, 0.4); }}
-        }}
-        .audit-ctrl-btn {{ background: #1e293b; border: 1px solid #334155; color: #e2e8f0; padding: 4px 8px; border-radius: 6px; font-size: 11px; font-weight: 700; cursor: pointer; transition: background 0.15s; }}
-        .audit-ctrl-btn:hover {{ background: #334155; color: white; }}
-        .audit-modal-footer {{ background: #1e293b; padding: 12px 20px; border-top: 1px solid #334155; display: flex; justify-content: space-between; align-items: center; }}
-        .audit-btn-done {{ background: #0284c7; color: white; border: none; padding: 8px 16px; border-radius: 8px; font-weight: 700; font-size: 13px; cursor: pointer; }}
-        .audit-btn-done:hover {{ background: #0369a1; }}
-
-        .footer-note {{ text-align: center; color: #94a3b8; font-size: 12px; margin-top: 20px; }}
-    </style>
+    .spotlight-box {{
+      border: 2px solid #2D6A4F;
+      background: rgba(45, 106, 79, 0.12);
+      border-radius: 6px;
+    }}
+  </style>
 </head>
-<body>
-    <div class="header">
+<body class="bg-[#ECE7DF] text-[#2A2421] antialiased min-h-screen p-0 md:p-6 flex flex-col items-center">
+
+  <!-- Desktop vs Mobile Simulator Switcher Bar -->
+  <div class="hidden md:flex w-full max-w-xl mb-4 items-center justify-between bg-[#FFFFFF] border border-[#DDD5C7] px-4 py-2 rounded-2xl shadow-xs">
+    <div class="flex items-center gap-2">
+      <span class="w-2.5 h-2.5 rounded-full bg-[#3A7D58]"></span>
+      <span class="text-xs font-semibold text-[#2A2421]">ระบบจัดการโพยหวย (Mobile-First Ledger)</span>
+    </div>
+    <div class="flex items-center gap-2">
+      <button id="btnToggleFrame" onclick="togglePhoneFrame()" class="text-xs font-medium px-3 py-1.5 rounded-xl bg-[#F4EFE6] hover:bg-[#EAE4D8] text-[#4A423B] border border-[#DDD5C7] transition-all">
+        <span id="frameText">สลับดูแบบเต็มจอ (Desktop)</span>
+      </button>
+    </div>
+  </div>
+
+  <!-- Main Viewport Container -->
+  <div id="appContainer" class="phone-frame w-full text-[#2A2421] flex flex-col transition-all duration-200">
+
+    <!-- Sticky App Header -->
+    <header class="sticky top-0 z-30 bg-[#F9F6F0]/95 backdrop-blur-sm border-b border-[#EBE4D8] px-4 py-3 flex items-center justify-between">
+      
+      <!-- Period Selector Dropdown -->
+      <div class="flex items-center gap-1.5 bg-[#FFFFFF] hover:bg-[#F5F0E6] px-3.5 py-1.5 rounded-full border border-[#DFD8CC] shadow-xs transition-all">
+        <svg class="w-3.5 h-3.5 text-[#2D6A4F]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"></path>
+        </svg>
+        <select onchange="location.href='/?period_id=' + this.value" class="bg-transparent text-xs font-semibold text-[#2A2421] outline-none cursor-pointer">
+          {period_options_html}
+        </select>
+      </div>
+
+      <div class="flex items-center gap-2">
+        {status_pill_html}
+        <!-- CSV Export Button -->
+        <a href="/export-csv?period_id={p_id}" title="ดาวน์โหลด CSV" class="h-7.5 px-2.5 rounded-xl bg-[#FFFFFF] hover:bg-[#F3EFE8] border border-[#DDD5C7] text-[#5C544C] text-xs font-medium flex items-center gap-1 shadow-xs transition-all text-decoration-none">
+          <svg class="w-3.5 h-3.5 text-[#7D756D]" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path></svg>
+          <span>CSV</span>
+        </a>
+      </div>
+    </header>
+
+    <!-- Scrollable Content Area -->
+    <main class="flex-1 overflow-y-auto pb-28 px-4 pt-3 space-y-4">
+
+      <!-- ==================== TAB 1: OVERVIEW (ภาพรวม) ==================== -->
+      <div id="tab-content-overview" class="space-y-4">
+        
         <div>
-            <h1 class="title">📊 กระดานจัดการตัวเลข & มอนิเตอร์ AI</h1>
-            <div style="font-size: 13px; color:#64748b; margin-top:4px;">ระบบวิเคราะห์ตัวเลขชุดที่ 1 & ตรวจจับความแม่นยำ AI เรียลไทม์</div>
+          <h1 class="text-xl font-bold text-[#2A2421] tracking-tight">ภาพรวมของงวด</h1>
+          <div class="text-xs font-medium text-[#7D756D] mt-0.5">{html_lib.escape(p_name)}</div>
+          <p class="text-xs text-[#8A8279] mt-0.5">ทุกโพย ทุกรางวัล และทุกยอดค้าง รวมอยู่ที่นี่</p>
         </div>
-        <div style="display:flex; gap:8px; flex-wrap:wrap;">
-            <a href="/prizes?period_id={p_id}" style="background:#dc2626; color:white; border:none; padding:10px 16px; border-radius:10px; font-weight:700; text-decoration:none; font-size:13px; display:inline-flex; align-items:center; gap:6px; box-shadow:0 2px 4px rgba(220,38,38,0.2);">🎰 ตรวจผลรางวัล</a>
-            <a href="/backup-gdrive" style="background:#0284c7; color:white; border:none; padding:10px 16px; border-radius:10px; font-weight:700; text-decoration:none; font-size:13px; display:inline-flex; align-items:center; gap:6px;">☁️ สำรอง Google Drive</a>
-            <a href="/export-ai-bundle?period_id={p_id}" style="background:#7c3aed; color:white; border:none; padding:10px 16px; border-radius:10px; font-weight:700; text-decoration:none; font-size:13px; display:inline-flex; align-items:center; gap:6px; box-shadow:0 2px 4px rgba(124,58,237,0.2);" download>📦 ชุดเทรน AI (.ZIP)</a>
-            <a href="/export?period_id={p_id}" class="btn-export" download>📥 ดาวน์โหลด Excel (.CSV)</a>
-            <a href="/export-ai-dataset?period_id={p_id}" class="btn-dataset" download>💾 ดาวน์โหลด AI Dataset (.JSON)</a>
+
+        <!-- Quick Action Buttons Bar -->
+        <div class="flex items-center gap-2">
+          <a href="/export-csv?period_id={p_id}" class="flex-1 py-2 px-3 rounded-2xl bg-[#FFFFFF] hover:bg-[#F5F0E6] border border-[#DDD5C7] text-xs font-medium text-[#4A423B] flex items-center justify-center gap-1.5 shadow-xs transition-all text-decoration-none">
+            <svg class="w-3.5 h-3.5 text-[#7D756D]" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path></svg>
+            <span>ดาวน์โหลดสรุป</span>
+          </a>
+          <button onclick="openSearchModal()" class="flex-1 py-2 px-3 rounded-2xl bg-[#FFFFFF] hover:bg-[#F5F0E6] border border-[#DDD5C7] text-xs font-medium text-[#4A423B] flex items-center justify-center gap-1.5 shadow-xs transition-all">
+            <svg class="w-3.5 h-3.5 text-[#3A7D58]" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"></path></svg>
+            <span>ค้นหาตัวเลข</span>
+          </button>
         </div>
-    </div>
 
-    {pending_users_html}
-    {period_control_html}
-
-    <div class="tab-nav">
-        <button class="tab-btn active" id="btn-tab-live" onclick="switchTab('live')">📋 กระดานสด (Live Board)</button>
-        <button class="tab-btn" id="btn-tab-set1" onclick="switchTab('set1')">📈 สถิติชุดที่ 1 (Set 1 Insights)</button>
-        <button class="tab-btn" id="btn-tab-ai" onclick="switchTab('ai')">🎯 ประสิทธิภาพ AI (AI Feedback)</button>
-        <button class="tab-btn" id="btn-tab-staff" onclick="switchTab('staff')">👥 ทีมงาน & ชั่วโมงพีค</button>
-    </div>
-
-    <!-- ==================== TAB 1: LIVE BOARD ==================== -->
-    <div id="tab-live" class="tab-content active">
-        {sheet_photos_html}
-
-        <div class="toolbar">
+        <!-- 1. Hero Main Card (Pastel Matcha Cream) -->
+        <div class="rounded-3xl bg-[#E8F3EB] border border-[#CFE4D4] p-5 shadow-xs relative overflow-hidden">
+          
+          <div class="flex items-start justify-between">
             <div>
-                <label style="font-size:13px; font-weight:700; color:#475569;">📁 เลือกดูงวด:</label>
-                <select class="period-select" onchange="window.location='/?period_id=' + this.value + '&tab=live'">
-                    {period_options_html}
-                </select>
+              <div class="flex items-center gap-2">
+                <span class="text-[11px] font-semibold text-[#1F543B] px-2.5 py-0.5 rounded-full bg-[#D4ECD9] border border-[#BCE1C5]">
+                  {'ยกยอดแล้ว' if not p_is_open else 'เปิดรับยอด'}
+                </span>
+                <span class="text-xs text-[#687F75]">{html_lib.escape(p_name)}</span>
+              </div>
+              <div class="mt-3">
+                <div class="text-xs text-[#526B5F] font-medium">ยอดรับโพยทั้งหมด</div>
+                <div class="text-3xl sm:text-4xl font-bold text-[#1F2623] font-mono tracking-tight mt-1 flex items-baseline gap-1">
+                  <span>{int(total_inflow):,}</span>
+                  <span class="text-xl font-bold text-[#2D6A4F]">฿</span>
+                </div>
+                <div class="text-xs text-[#687F75] mt-1 font-mono">
+                  {total_sheets} ใบ · {total_employees} คนเดินโพย · {total_entries} รายการ
+                </div>
+              </div>
             </div>
-        </div>
 
-        <div class="stats-grid">
-            <div class="stat-card">
-                <div class="stat-label">เอกสารงวดนี้</div>
-                <div class="stat-num" style="color:#2563eb">{summary['total_sheets']} แผ่น</div>
+            <!-- Stylized Sheet Illustration -->
+            <div class="w-14 h-18 bg-[#FFFFFF] rounded-2xl border border-[#CFE4D4] p-2 flex flex-col justify-between shadow-xs">
+              <div class="flex items-center justify-between">
+                <div class="w-4 h-1.5 bg-[#A3D4B3] rounded"></div>
+                <span class="w-4 h-4 rounded-full bg-[#3A7D58] text-[#FFFFFF] flex items-center justify-center text-[9px] font-bold">✓</span>
+              </div>
+              <div class="space-y-1.5">
+                <div class="w-full h-1 bg-[#E1ECE4] rounded"></div>
+                <div class="w-3/4 h-1 bg-[#E1ECE4] rounded"></div>
+                <div class="w-1/2 h-1 bg-[#E1ECE4] rounded"></div>
+              </div>
             </div>
-            <div class="stat-card">
-                <div class="stat-label">รายการทั้งหมด</div>
-                <div class="stat-num" style="color:#059669">{summary['total_entries']} รายการ</div>
-            </div>
-            <div class="stat-card" style="border-left: 4px solid #10b981; background: #f0fdf4;">
-                <div class="stat-label" style="color:#15803d; font-weight:700;">💰 ยอดรับรวมงวดนี้</div>
-                <div class="stat-num" style="color:#16a34a">{total_inflow:,.0f} <span style="font-size:13px; font-weight:600;">บาท</span></div>
-            </div>
-            <div class="stat-card">
-                <div class="stat-label">หมวด "บน"</div>
-                <div class="stat-num" style="color:#2563eb">{len(top_items)}</div>
-            </div>
-            <div class="stat-card">
-                <div class="stat-label">หมวด "ล่าง"</div>
-                <div class="stat-num" style="color:#dc2626">{len(bot_items)}</div>
-            </div>
-            <div class="stat-card">
-                <div class="stat-label">หมวด "บนล่าง"</div>
-                <div class="stat-num" style="color:#7c3aed">{len(topbot_items)}</div>
-            </div>
-        </div>
+          </div>
 
-        <div class="search-box" style="display:flex; gap:8px; align-items:center;">
-            <input type="text" id="searchInput" class="search-input" placeholder="🔍 ค้นหาเลขในตารางสด หรือพิมพ์เลขแล้วกดเจาะลึก (เช่น 401, 370, 12)..." onkeyup="filterTable()" onkeypress="if(event.key==='Enter') executeDeepSearch()" style="flex:1;">
-            <button type="button" onclick="executeDeepSearch()" style="background:#2563eb; color:white; border:none; padding:12px 18px; border-radius:10px; font-weight:700; font-size:14px; cursor:pointer; display:inline-flex; align-items:center; gap:6px; white-space:nowrap; box-shadow:0 2px 4px rgba(37,99,235,0.2);">
-                🔎 เจาะลึกเลขนี้
+          <!-- Action Button inside Hero Card -->
+          <div class="mt-5">
+            <button onclick="switchTab('table')" class="w-full py-2.5 px-4 rounded-2xl bg-[#3A7D58] hover:bg-[#326C4C] text-[#FFFFFF] text-sm font-semibold flex items-center justify-center gap-2 shadow-xs transition-all active:scale-[0.99]">
+              <svg class="w-4 h-4 text-[#FFFFFF]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01"></path>
+              </svg>
+              <span>ดูโพยทั้งหมด</span>
             </button>
-        </div>
-        <div id="deepSearchResult" style="display:none; margin-bottom:16px; background:white; border:2px solid #3b82f6; border-radius:12px; padding:16px; box-shadow:0 4px 6px -1px rgba(0,0,0,0.1);"></div>
-
-        <div class="table-container">
-            <table id="dataTable">
-                <thead>
-                    <tr>
-                        <th style="width: 80px; text-align: center;">ลำดับ</th>
-                        <th style="color:#2563eb;">บน ({len(top_items)})</th>
-                        <th style="color:#dc2626;">ล่าง ({len(bot_items)})</th>
-                        <th style="color:#7c3aed;">บนล่าง ({len(topbot_items)})</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {table_rows_html}
-                </tbody>
-            </table>
-        </div>
-    </div>
-
-    <!-- ==================== TAB 2: SET 1 INSIGHTS ==================== -->
-    <div id="tab-set1" class="tab-content">
-        <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px; margin-bottom:14px;">
-            <div class="scope-pills">
-                <a href="/?period_id={p_id}&scope=period&tab=set1" class="scope-pill {'active' if not is_all_time else ''}">📍 เฉพาะงวดนี้ ({p_name})</a>
-                <a href="/?period_id={p_id}&scope=all&tab=set1" class="scope-pill {'active' if is_all_time else ''}">🌐 ตลอดกาล (All-Time)</a>
-            </div>
-            <span style="font-size:13px; color:#64748b; font-weight:600;">ชุดตัวเลขที่นำมาวิเคราะห์: {tot_s1} รายการ</span>
+          </div>
         </div>
 
-        <h3 style="margin:0 0 10px 0; font-size:16px; color:#0f172a;">📊 สัดส่วนจำนวนหลักของตัวเลขชุดที่ 1</h3>
-        <div class="stats-grid" style="grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));">
-            <div class="stat-card" style="border-left: 4px solid #2563eb;">
-                <div class="stat-label">เลข 2 หลัก</div>
-                <div class="stat-num" style="color:#2563eb">{cnt2:,} <span style="font-size:14px; color:#64748b;">({pct2}%)</span></div>
-            </div>
-            <div class="stat-card" style="border-left: 4px solid #059669;">
-                <div class="stat-label">เลข 3 หลัก</div>
-                <div class="stat-num" style="color:#059669">{cnt3:,} <span style="font-size:14px; color:#64748b;">({pct3}%)</span></div>
-            </div>
-            <div class="stat-card" style="border-left: 4px solid #7c3aed;">
-                <div class="stat-label">เลข 4 หลัก</div>
-                <div class="stat-num" style="color:#7c3aed">{cnt4:,} <span style="font-size:14px; color:#64748b;">({pct4}%)</span></div>
-            </div>
-        </div>
-
-        <h3 style="margin:16px 0 10px 0; font-size:16px; color:#0f172a;">🎲 จำแนกตามรูปแบบตัวเลขพิเศษ</h3>
-        <div class="stats-grid">
-            <div class="stat-card">
-                <div class="stat-label">เลขเบิ้ล (11, 22)</div>
-                <div class="stat-num" style="color:#d97706">{pat_counts.get('เลขเบิ้ล', 0):,}</div>
-            </div>
-            <div class="stat-card">
-                <div class="stat-label">เลขหาม (121, 505)</div>
-                <div class="stat-num" style="color:#0284c7">{pat_counts.get('เลขหาม', 0):,}</div>
-            </div>
-            <div class="stat-card">
-                <div class="stat-label">เลขตอง (111, 777)</div>
-                <div class="stat-num" style="color:#dc2626">{pat_counts.get('เลขตอง', 0):,}</div>
-            </div>
-            <div class="stat-card">
-                <div class="stat-label">เลขเรียง (123, 789)</div>
-                <div class="stat-num" style="color:#16a34a">{pat_counts.get('เลขเรียง', 0):,}</div>
-            </div>
-            <div class="stat-card">
-                <div class="stat-label">เลขทั่วไป</div>
-                <div class="stat-num" style="color:#64748b">{pat_counts.get('เลขทั่วไป', 0):,}</div>
-            </div>
-        </div>
-
-        <h3 style="margin:16px 0 10px 0; font-size:16px; color:#0f172a;">🏆 Top 20 เลขยอดฮิตที่มีคนส่งเยอะที่สุด ({'ตลอดกาล' if is_all_time else p_name})</h3>
-        <div class="table-container">
-            <table>
-                <thead>
-                    <tr>
-                        <th style="width:60px; text-align:center;">อันดับ</th>
-                        <th>เลขชุดที่ 1</th>
-                        <th>รูปแบบ</th>
-                        <th style="text-align:center;">จำนวนครั้งที่พบ</th>
-                        <th style="text-align:center;">หมวด บน</th>
-                        <th style="text-align:center;">หมวด ล่าง</th>
-                        <th style="text-align:center;">หมวด บนล่าง</th>
-                        <th style="text-align:right;">ยอดรวม Set 2</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {top20_html}
-                </tbody>
-            </table>
-        </div>
-    </div>
-
-    <!-- ==================== TAB 3: AI FEEDBACK & ACCURACY ==================== -->
-    <div id="tab-ai" class="tab-content">
-        <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px; margin-bottom:14px;">
-            <div class="scope-pills">
-                <a href="/?period_id={p_id}&scope=period&tab=ai" class="scope-pill {'active' if not is_all_time else ''}">📍 เฉพาะงวดนี้</a>
-                <a href="/?period_id={p_id}&scope=all&tab=ai" class="scope-pill {'active' if is_all_time else ''}">🌐 ตลอดกาล (All-Time)</a>
-            </div>
-        </div>
-
-        {ai_training_card_html}
-
-        <div class="stats-grid" style="grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));">
-            <div class="stat-card" style="border-left: 4px solid #16a34a;">
-                <div class="stat-label">ความแม่นยำรอบแรก (Clean Rate)</div>
-                <div class="stat-num" style="color:#16a34a;">{ai_metrics['clean_rate']}%</div>
-            </div>
-            <div class="stat-card">
-                <div class="stat-label">กระดาษที่ผ่าน 100% โดยไม่แก้</div>
-                <div class="stat-num" style="color:#0f172a;">{ai_metrics['clean_scans']} / {ai_metrics['total_scans']} <span style="font-size:12px; color:#64748b;">แผ่น</span></div>
-            </div>
-            <div class="stat-card">
-                <div class="stat-label">เวลาประมวลผล AI เฉลี่ย</div>
-                <div class="stat-num" style="color:#2563eb;">{ai_metrics['avg_latency_s']} <span style="font-size:12px; color:#64748b;">วินาที</span></div>
-            </div>
-            <div class="stat-card">
-                <div class="stat-label">รายการที่มนุษย์แก้ไข</div>
-                <div class="stat-num" style="color:#d97706;">{len(ai_metrics['recent_corrections']):,} <span style="font-size:12px; color:#64748b;">ครั้ง</span></div>
-            </div>
-        </div>
-
-        <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap:16px;">
+        <!-- 2. Dual Ledger Cards (ยอดส่งเจ้ามือ vs รางวัลคนเดินโพย) -->
+        <div class="grid grid-cols-2 gap-2.5">
+          
+          <!-- Card Left: ยอดส่งเจ้ามือ (Peach) -->
+          <div class="bg-[#FDF2EA] border border-[#F7DFD2] p-3.5 rounded-3xl flex flex-col justify-between shadow-xs">
             <div>
-                <h3 style="margin:10px 0; font-size:16px; color:#0f172a;">🔴 คู่ตัวเลขที่ AI มักสับสน/อ่านผิดบ่อยที่สุด</h3>
-                <div class="table-container">
-                    <table>
-                        <thead>
-                            <tr>
-                                <th>คู่ตัวเลขที่อ่านผิด (AI ➔ ความจริง)</th>
-                                <th style="text-align:center; width:120px;">จำนวนครั้ง</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {misread_html}
-                        </tbody>
-                    </table>
+              <div class="flex items-center gap-2">
+                <div class="w-7 h-7 rounded-xl bg-[#FBE4D5] flex items-center justify-center text-[#A35C2B]">
+                  <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"></path></svg>
                 </div>
+                <span class="text-xs font-semibold text-[#4A392F]">ยอดส่งเจ้ามือ</span>
+              </div>
+              <div class="mt-2.5">
+                <div class="text-lg font-bold text-[#2A2421] font-mono flex items-baseline gap-1">
+                  <span>{int(dealer_share_vol):,}</span>
+                  <span class="text-xs font-semibold text-[#A35C2B]">฿</span>
+                </div>
+                <div class="mt-1">
+                  <span class="text-[10px] font-semibold text-[#A35C2B] px-2 py-0.5 rounded-full bg-[#FCE6D7]">
+                    1 เจ้า
+                  </span>
+                </div>
+              </div>
             </div>
 
+            <div class="mt-3 pt-2.5 border-t border-[#F5D5C4]">
+              <div class="flex items-center justify-between text-[11px] text-[#7A6457]">
+                <span>สัดส่วนต่อยอดรับ</span>
+                <span class="font-mono text-[#2A2421] font-semibold">{dealer_share_pct}%</span>
+              </div>
+              <div class="w-full bg-[#F5D5C4] h-1.5 rounded-full mt-1.5 overflow-hidden">
+                <div class="bg-[#D97736] h-full rounded-full" style="width: {dealer_share_pct}%"></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Card Right: รางวัลคนเดินโพย (Vanilla) -->
+          <div class="bg-[#FEF9EA] border border-[#F6ECCB] p-3.5 rounded-3xl flex flex-col justify-between shadow-xs">
             <div>
-                <h3 style="margin:10px 0; font-size:16px; color:#0f172a;">📝 ประวัติการแก้ไขล่าสุดของพนักงาน (Feedback Log)</h3>
-                <div class="table-container">
-                    <table>
-                        <thead>
-                            <tr>
-                                <th>เวลา</th>
-                                <th>ใบที่</th>
-                                <th>พนักงาน</th>
-                                <th>การกระทำ</th>
-                                <th>รายละเอียด</th>
-                                <th>โน้ต</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {corr_html}
-                        </tbody>
-                    </table>
+              <div class="flex items-center gap-2">
+                <div class="w-7 h-7 rounded-xl bg-[#FCF0CE] flex items-center justify-center text-[#8F6E14]">
+                  <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.286 6.857L21 12l-5.714 2.143L13 21l-2.286-6.857L5 12l5.714-2.143L13 3z"></path></svg>
                 </div>
+                <span class="text-xs font-semibold text-[#4D4222]">รางวัลคนเดินโพย</span>
+              </div>
+              <div class="mt-2.5">
+                <div class="text-lg font-bold text-[#2A2421] font-mono flex items-baseline gap-1">
+                  <span>{int(payout_total):,}</span>
+                  <span class="text-xs font-semibold text-[#8F6E14]">฿</span>
+                </div>
+                <div class="mt-1">
+                  <span class="text-[10px] font-semibold text-[#8F6E14] px-2 py-0.5 rounded-full bg-[#FAF0CE]">
+                    {p_winners.get('total_winners', 0)} ใบถูก
+                  </span>
+                </div>
+              </div>
             </div>
+
+            <div class="mt-3 pt-2.5 border-t border-[#F2E3B8]">
+              <div class="flex items-center justify-between text-[11px] text-[#7A6B43]">
+                <span>สัดส่วนต่อยอดรับ</span>
+                <span class="font-mono text-[#2A2421] font-semibold">{payout_share_pct}%</span>
+              </div>
+              <div class="w-full bg-[#F2E3B8] h-1.5 rounded-full mt-1.5 overflow-hidden">
+                <div class="bg-[#D49E1E] h-full rounded-full" style="width: {min(payout_share_pct, 100)}%"></div>
+              </div>
+            </div>
+          </div>
+
         </div>
+
+        <!-- 3. Category Breakdown: หมวดหมู่ [บน / ล่าง / บนล่าง] -->
+        <div class="bg-[#FFFFFF] border border-[#EDE7DD] p-4 rounded-3xl shadow-xs">
+          <div class="flex items-center justify-between mb-2.5">
+            <span class="text-xs font-semibold text-[#4A423B]">ยอดแยกตามหมวดหมู่</span>
+            <span class="text-[11px] text-[#7D756D] font-mono">3 หมวด</span>
+          </div>
+          <div class="grid grid-cols-3 gap-2">
+            <!-- บน -->
+            <div class="bg-[#E8F3EB] border border-[#CFE4D4] p-2.5 rounded-2xl">
+              <div class="text-xs font-bold text-[#2D6A4F]">[บน]</div>
+              <div class="text-sm font-bold text-[#1F2623] font-mono mt-1">{int(financials['inflow_by_category'].get('บน', 0)):,}</div>
+              <div class="text-[10px] text-[#5C6E64] mt-0.5 font-mono">{financials['count_by_category'].get('บน', 0)} รายการ</div>
+              <div class="w-full bg-[#CFE4D4] h-1 rounded-full mt-1.5 overflow-hidden">
+                <div class="bg-[#3A7D58] h-full rounded-full" style="width: {round(financials['inflow_by_category'].get('บน', 0) / total_inflow * 100) if total_inflow else 0}%"></div>
+              </div>
+            </div>
+
+            <!-- ล่าง -->
+            <div class="bg-[#F3EFF8] border border-[#E3D9ED] p-2.5 rounded-2xl">
+              <div class="text-xs font-bold text-[#6B5384]">[ล่าง]</div>
+              <div class="text-sm font-bold text-[#1F2623] font-mono mt-1">{int(financials['inflow_by_category'].get('ล่าง', 0)):,}</div>
+              <div class="text-[10px] text-[#6E5F7A] mt-0.5 font-mono">{financials['count_by_category'].get('ล่าง', 0)} รายการ</div>
+              <div class="w-full bg-[#E3D9ED] h-1 rounded-full mt-1.5 overflow-hidden">
+                <div class="bg-[#7E649B] h-full rounded-full" style="width: {round(financials['inflow_by_category'].get('ล่าง', 0) / total_inflow * 100) if total_inflow else 0}%"></div>
+              </div>
+            </div>
+
+            <!-- บนล่าง -->
+            <div class="bg-[#FDF2EA] border border-[#F7DFD2] p-2.5 rounded-2xl">
+              <div class="text-xs font-bold text-[#A35C2B]">[บนล่าง]</div>
+              <div class="text-sm font-bold text-[#1F2623] font-mono mt-1">{int(financials['inflow_by_category'].get('บนล่าง', 0)):,}</div>
+              <div class="text-[10px] text-[#7A6457] mt-0.5 font-mono">{financials['count_by_category'].get('บนล่าง', 0)} รายการ</div>
+              <div class="w-full bg-[#F5D5C4] h-1 rounded-full mt-1.5 overflow-hidden">
+                <div class="bg-[#D97736] h-full rounded-full" style="width: {round(financials['inflow_by_category'].get('บนล่าง', 0) / total_inflow * 100) if total_inflow else 0}%"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 4. Breakdown Section: ประเภทเลข [2 ตัว / 3 ตัว] -->
+        <div class="bg-[#FFFFFF] border border-[#EDE7DD] p-4 rounded-3xl shadow-xs">
+          <div class="flex items-center justify-between mb-2.5">
+            <span class="text-xs font-semibold text-[#4A423B]">สัดส่วนประเภทตัวเลข</span>
+            <span class="text-[11px] text-[#7D756D] font-mono">2 ตัว vs 3 ตัว</span>
+          </div>
+          <div class="grid grid-cols-2 gap-2.5">
+            <!-- 2 Digits -->
+            <div class="bg-[#F9F6F0] border border-[#EAE3D8] p-3 rounded-2xl">
+              <div class="flex items-center justify-between text-xs">
+                <span class="font-medium text-[#4A423B]">เลข 2 ตัว</span>
+                <span class="text-[#6B5384] font-mono font-semibold">{round(financials.get('digits_2_volume', 0) / total_inflow * 100) if total_inflow else 0}%</span>
+              </div>
+              <div class="text-base font-bold text-[#2A2421] font-mono mt-1">
+                {int(financials.get('digits_2_volume', 0)):,} <span class="text-xs font-normal text-[#6B5384] font-sans">฿</span>
+              </div>
+              <div class="text-[10px] text-[#7D756D] mt-0.5 font-mono">{financials.get('digits_2_count', 0)} รายการ</div>
+              <div class="w-full bg-[#E5DFD4] h-1 rounded-full mt-2 overflow-hidden">
+                <div class="bg-[#7E649B] h-full rounded-full" style="width: {round(financials.get('digits_2_volume', 0) / total_inflow * 100) if total_inflow else 0}%"></div>
+              </div>
+            </div>
+
+            <!-- 3 Digits -->
+            <div class="bg-[#F9F6F0] border border-[#EAE3D8] p-3 rounded-2xl">
+              <div class="flex items-center justify-between text-xs">
+                <span class="font-medium text-[#4A423B]">เลข 3 ตัว</span>
+                <span class="text-[#2D6A4F] font-mono font-semibold">{round(financials.get('digits_3_volume', 0) / total_inflow * 100) if total_inflow else 0}%</span>
+              </div>
+              <div class="text-base font-bold text-[#2A2421] font-mono mt-1">
+                {int(financials.get('digits_3_volume', 0)):,} <span class="text-xs font-normal text-[#2D6A4F] font-sans">฿</span>
+              </div>
+              <div class="text-[10px] text-[#7D756D] mt-0.5 font-mono">{financials.get('digits_3_count', 0)} รายการ</div>
+              <div class="w-full bg-[#E5DFD4] h-1 rounded-full mt-2 overflow-hidden">
+                <div class="bg-[#3A7D58] h-full rounded-full" style="width: {round(financials.get('digits_3_volume', 0) / total_inflow * 100) if total_inflow else 0}%"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 5. Top Popular Numbers -->
+        <div class="bg-[#FFFFFF] border border-[#EDE7DD] p-4 rounded-3xl shadow-xs">
+          <div class="flex items-center justify-between mb-2.5">
+            <span class="text-xs font-semibold text-[#4A423B]">ตัวเลขยอดนิยมประจำงวด</span>
+            <span class="text-[11px] text-[#7D756D]">แตะเพื่อค้นหา</span>
+          </div>
+
+          <div class="grid grid-cols-4 gap-2 text-center">
+            {top_numbers_html}
+          </div>
+        </div>
+
+      </div>
+
+      <!-- ==================== TAB 2: LIVE SHEET TABLE (ตารางโพย) ==================== -->
+      <div id="tab-content-table" class="space-y-3 hidden">
+        
+        <div class="flex items-center justify-between">
+          <div>
+            <h2 class="text-base font-bold text-[#2A2421]">กระดานตารางโพย</h2>
+            <p class="text-xs text-[#7D756D]">แตะที่แถวเพื่อส่องลายมือต้นฉบับ</p>
+          </div>
+          <span class="text-xs font-mono font-semibold text-[#2D6A4F] bg-[#E8F3EB] px-2.5 py-1 rounded-xl border border-[#CFE4D4]">
+            {total_entries} รายการ
+          </span>
+        </div>
+
+        <!-- Sub-tabs for Column Filter -->
+        <div class="flex items-center gap-1 p-1 bg-[#F0EBE1] border border-[#DDD5C7] rounded-2xl">
+          <button id="btnColAll" onclick="filterCol('all')" class="flex-1 py-1.5 text-xs font-semibold rounded-xl bg-[#FFFFFF] text-[#2A2421] border border-[#DDD5C7] shadow-xs transition-all">
+            ทั้งหมด
+          </button>
+          <button id="btnColTop" onclick="filterCol('บน')" class="flex-1 py-1.5 text-xs font-medium rounded-xl text-[#6D655E] hover:text-[#2A2421] transition-all">
+            บน
+          </button>
+          <button id="btnColBot" onclick="filterCol('ล่าง')" class="flex-1 py-1.5 text-xs font-medium rounded-xl text-[#6D655E] hover:text-[#2A2421] transition-all">
+            ล่าง
+          </button>
+          <button id="btnColTopBot" onclick="filterCol('บนล่าง')" class="flex-1 py-1.5 text-xs font-medium rounded-xl text-[#6D655E] hover:text-[#2A2421] transition-all">
+            บนล่าง
+          </button>
+        </div>
+
+        <!-- Table Rows Container -->
+        <div id="tableRowsList" class="space-y-2">
+          {table_rows_html}
+        </div>
+
+      </div>
+
+      <!-- ==================== TAB 4: PRIZES & P&L (ตรวจรางวัล) ==================== -->
+      <div id="tab-content-prizes" class="space-y-4 hidden">
+        
+        <div>
+          <h2 class="text-base font-bold text-[#2A2421]">ผลรางวัล & บัญชีกำไร-ขาดทุน</h2>
+          <p class="text-xs text-[#7D756D]">ผลสลากกินแบ่งรัฐบาล ({prize_data.get('source', 'GLO Official API')})</p>
+        </div>
+
+        <!-- Official Lottery Live Results Box -->
+        <div class="bg-[#FEF9EA] border border-[#F6ECCB] p-4 rounded-3xl shadow-xs">
+          <div class="flex items-center justify-between mb-2.5">
+            <span class="text-xs font-semibold text-[#5E4F28]">ผลสลากประจำงวด</span>
+            <span class="text-[11px] text-[#7A6B43] font-mono">{prize_data.get('date', p_name)}</span>
+          </div>
+
+          <div class="grid grid-cols-3 gap-2 text-center">
+            <div class="bg-[#FFFFFF] p-2.5 rounded-2xl border border-[#F4E6BD]">
+              <div class="text-[10px] text-[#7D756D]">รางวัลที่ 1</div>
+              <div class="text-base font-bold text-[#2A2421] font-mono mt-0.5">{prize_data.get('prize1', '-')}</div>
+            </div>
+            <div class="bg-[#FFFFFF] p-2.5 rounded-2xl border border-[#F4E6BD]">
+              <div class="text-[10px] text-[#7D756D]">3 ตัวบน</div>
+              <div class="text-base font-bold text-[#2D6A4F] font-mono mt-0.5">{prize_data.get('top3', '-')}</div>
+            </div>
+            <div class="bg-[#FFFFFF] p-2.5 rounded-2xl border border-[#F4E6BD]">
+              <div class="text-[10px] text-[#7D756D]">2 ตัวล่าง</div>
+              <div class="text-base font-bold text-[#2D6A4F] font-mono mt-0.5">{prize_data.get('bottom2', '-')}</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- P&L Financial Card -->
+        <div class="bg-[#FFFFFF] border border-[#EDE7DD] p-4 rounded-3xl space-y-3 shadow-xs">
+          <div class="flex items-center justify-between">
+            <span class="text-xs font-semibold text-[#2A2421]">สรุปกำไร-ขาดทุนประจำงวด</span>
+            <span class="text-xs font-semibold {'text-[#1F543B] bg-[#E8F3EB] border-[#CFE4D4]' if net_margin >= 0 else 'text-[#A84357] bg-[#FCEEEF] border-[#F7D5D9]'} px-2.5 py-0.5 rounded-full border">
+              {'กำไรสุทธิ +' if net_margin >= 0 else 'ขาดทุน '}{margin_pct}%
+            </span>
+          </div>
+
+          <div class="grid grid-cols-2 gap-2 text-center">
+            <div class="bg-[#E8F3EB] p-3 rounded-2xl border border-[#CFE4D4]">
+              <div class="text-[11px] text-[#526B5F]">ยอดรับรวม (Inflow)</div>
+              <div class="text-base font-bold text-[#1F2623] font-mono mt-0.5">{int(total_inflow):,} ฿</div>
+            </div>
+            <div class="bg-[#FCEEEF] p-3 rounded-2xl border border-[#F7D5D9]">
+              <div class="text-[11px] text-[#A84357]">ยอดจ่ายรางวัล (Payout)</div>
+              <div class="text-base font-bold text-[#912A3E] font-mono mt-0.5">{int(payout_total):,} ฿</div>
+            </div>
+          </div>
+
+          <div class="p-3.5 bg-[#E8F3EB] border border-[#CFE4D4] rounded-2xl flex items-center justify-between">
+            <div>
+              <div class="text-xs text-[#526B5F]">กำไรสุทธิ (Net Margin)</div>
+              <div class="text-xl font-bold {'text-[#2D6A4F]' if net_margin >= 0 else 'text-[#A84357]'} font-mono mt-0.5">
+                {'+' if net_margin >= 0 else ''}{int(net_margin):,} ฿
+              </div>
+            </div>
+            <a href="/prizes?period_id={p_id}" class="px-4 py-2 text-xs font-bold bg-[#3A7D58] hover:bg-[#326C4C] text-[#FFFFFF] rounded-xl shadow-xs transition-all text-decoration-none">
+              ดูบิลถูกรางวัล
+            </a>
+          </div>
+        </div>
+
+        <!-- Winning bills list -->
+        <div class="bg-[#FFFFFF] border border-[#EDE7DD] p-4 rounded-3xl space-y-2.5 shadow-xs">
+          <div class="flex items-center justify-between text-xs">
+            <span class="font-semibold text-[#2A2421]">รายการถูกรางวัล ({p_winners.get('total_winners', 0)} รายการ)</span>
+          </div>
+          <div class="space-y-1.5">
+            {winners_rows_html}
+          </div>
+        </div>
+
+      </div>
+
+      <!-- ==================== TAB 5: ADMIN / SETTINGS (จัดการ) ==================== -->
+      <div id="tab-content-admin" class="space-y-4 hidden">
+        
+        <div>
+          <h2 class="text-base font-bold text-[#2A2421]">จัดการระบบ</h2>
+          <p class="text-xs text-[#7D756D]">ควบคุมสถานะงวดและส่งออกรายงาน</p>
+        </div>
+
+        <div class="bg-[#FFFFFF] border border-[#EDE7DD] p-4 rounded-3xl space-y-3 shadow-xs">
+          <div class="text-xs font-semibold text-[#2A2421]">สถานะงวดปัจจุบัน: <span class="font-bold">{html_lib.escape(p_name)}</span></div>
+          <div class="flex gap-2">
+            <form method="POST" action="/api/period/toggle" class="flex-1">
+              <input type="hidden" name="period_id" value="{p_id}">
+              <input type="hidden" name="action" value="close">
+              <button type="submit" class="w-full py-2 text-xs font-semibold bg-[#FDF0F1] hover:bg-[#FCE3E5] text-[#A84357] border border-[#F7D5D9] rounded-2xl transition-all cursor-pointer">
+                ปิดรับงวดนี้
+              </button>
+            </form>
+            <form method="POST" action="/api/period/toggle" class="flex-1">
+              <input type="hidden" name="period_id" value="{p_id}">
+              <input type="hidden" name="action" value="open">
+              <button type="submit" class="w-full py-2 text-xs font-semibold bg-[#E8F3EB] hover:bg-[#DDF0E2] text-[#2D6A4F] border border-[#CFE4D4] rounded-2xl transition-all cursor-pointer">
+                เปิดรับงวดนี้
+              </button>
+            </form>
+          </div>
+        </div>
+
+        <div class="bg-[#FFFFFF] border border-[#EDE7DD] p-4 rounded-3xl space-y-2 shadow-xs">
+          <div class="text-xs font-semibold text-[#2A2421]">ดาวน์โหลดรายงาน</div>
+          <div class="space-y-2">
+            <a href="/export-csv?period_id={p_id}" class="w-full py-2.5 px-3.5 rounded-2xl bg-[#F9F6F0] hover:bg-[#F2ECE2] border border-[#DDD5C7] text-xs font-medium text-[#2A2421] flex items-center justify-between transition-colors text-decoration-none">
+              <span>รายงาน CSV รวมตารางทั้งหมด</span>
+              <span class="text-[#7D756D] font-mono">.csv</span>
+            </a>
+            <a href="/export-vertical-csv?period_id={p_id}" class="w-full py-2.5 px-3.5 rounded-2xl bg-[#F9F6F0] hover:bg-[#F2ECE2] border border-[#DDD5C7] text-xs font-medium text-[#2A2421] flex items-center justify-between transition-colors text-decoration-none">
+              <span>รายงาน CSV แนวตั้ง (สำหรับ Excel)</span>
+              <span class="text-[#7D756D] font-mono">.csv</span>
+            </a>
+            <a href="/export-ai-bundle?period_id={p_id}" class="w-full py-2.5 px-3.5 rounded-2xl bg-[#F9F6F0] hover:bg-[#F2ECE2] border border-[#DDD5C7] text-xs font-medium text-[#2A2421] flex items-center justify-between transition-colors text-decoration-none">
+              <span>ชุดข้อมูล JSONL สำหรับเทรน AI (Google Colab)</span>
+              <span class="text-[#7D756D] font-mono">.jsonl</span>
+            </a>
+          </div>
+        </div>
+
+        <!-- Worker Sheet Counts -->
+        <div class="bg-[#FFFFFF] border border-[#EDE7DD] p-4 rounded-3xl space-y-2.5 shadow-xs">
+          <div class="flex items-center justify-between text-xs">
+            <span class="font-semibold text-[#2A2421]">พนักงานส่งงาน</span>
+            <span class="text-[#7D756D] font-mono">{len(worker_counts)} คน</span>
+          </div>
+          <div class="space-y-2 text-xs text-[#2A2421]">
+            {worker_rows_html}
+          </div>
+        </div>
+
+      </div>
+
+    </main>
+
+    <!-- Bottom Navigation Bar (Pastel Ivory Style) -->
+    <nav class="fixed md:absolute bottom-0 left-0 right-0 z-40 bg-[#FFFFFF] border-t border-[#EBE4D8] px-3 py-2 flex items-center justify-around shadow-lg">
+      
+      <!-- Tab 1: Overview -->
+      <button id="nav-btn-overview" onclick="switchTab('overview')" class="flex flex-col items-center justify-center text-[#2D6A4F] transition-colors cursor-pointer">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z"></path></svg>
+        <span class="text-[10px] font-semibold mt-1">ภาพรวม</span>
+      </button>
+
+      <!-- Tab 2: Table -->
+      <button id="nav-btn-table" onclick="switchTab('table')" class="flex flex-col items-center justify-center text-[#9E968D] hover:text-[#4A423B] transition-colors cursor-pointer">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01"></path></svg>
+        <span class="text-[10px] font-medium mt-1">ตารางโพย</span>
+      </button>
+
+      <!-- Tab 3 (Center): Raised Action Button with Warm Cream Ring -->
+      <div class="relative -top-5">
+        <button onclick="openSearchModal()" title="ค้นหาตัวเลขด่วน" class="w-13 h-13 rounded-full bg-[#3A7D58] hover:bg-[#326C4C] text-[#FFFFFF] flex items-center justify-center text-2xl font-bold shadow-md ring-4 ring-[#F9F6F0] transition-all active:scale-95 p-3.5 cursor-pointer">
+          <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M12 4v16m8-8H4"></path></svg>
+        </button>
+      </div>
+
+      <!-- Tab 4: Prizes -->
+      <button id="nav-btn-prizes" onclick="switchTab('prizes')" class="flex flex-col items-center justify-center text-[#9E968D] hover:text-[#4A423B] transition-colors cursor-pointer">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+        <span class="text-[10px] font-medium mt-1">ตรวจรางวัล</span>
+      </button>
+
+      <!-- Tab 5: Admin -->
+      <button id="nav-btn-admin" onclick="switchTab('admin')" class="flex flex-col items-center justify-center text-[#9E968D] hover:text-[#4A423B] transition-colors cursor-pointer">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path></svg>
+        <span class="text-[10px] font-medium mt-1">จัดการ</span>
+      </button>
+
+    </nav>
+
+    <!-- ==================== MODAL 1: INSTANT SEARCH ==================== -->
+    <div id="searchModal" class="fixed inset-0 z-50 bg-[#2A2421]/45 backdrop-blur-xs hidden flex items-center justify-center p-3" onclick="if(event.target === this) closeSearchModal()">
+      <div class="w-full max-w-sm bg-[#FFFFFF] border border-[#DDD5C7] rounded-3xl p-4 shadow-xl space-y-3">
+        
+        <div class="flex items-center justify-between border-b border-[#EBE4D8] pb-2.5">
+          <div class="text-sm font-bold text-[#2A2421]">ค้นหาตัวเลขด่วน</div>
+          <button onclick="closeSearchModal()" class="w-7 h-7 rounded-xl bg-[#F4EFE6] text-[#7D756D] hover:text-[#2A2421] flex items-center justify-center text-xs cursor-pointer">✕</button>
+        </div>
+
+        <input type="text" id="instantSearchInput" oninput="doSearch()" placeholder="พิมพ์ตัวเลข เช่น 401, 370..." class="w-full bg-[#F9F6F0] border border-[#DDD5C7] focus:border-[#3A7D58] rounded-2xl px-3.5 py-2.5 text-base font-mono font-bold text-[#2A2421] placeholder-[#A8A095] outline-none">
+
+        <!-- Quick suggestion pills -->
+        <div id="searchQuickPills" class="flex items-center gap-1.5 flex-wrap text-xs">
+          <!-- Populated by JS -->
+        </div>
+
+        <!-- Search Results Box -->
+        <div id="searchResultsBox" class="space-y-1.5 max-h-60 overflow-y-auto pt-1">
+          <!-- Dynamic Results -->
+        </div>
+
+      </div>
     </div>
 
-    <!-- ==================== TAB 4: STAFF & PEAK HOURS ==================== -->
-    <div id="tab-staff" class="tab-content">
-        <h3 style="margin:0 0 10px 0; font-size:16px; color:#0f172a;">⏰ กราฟช่วงเวลาส่งงานหนาแน่นรายชั่วโมง (Peak Hours)</h3>
-        <div class="bars-container">
-            {hourly_bars_html}
+    <!-- ==================== MODAL 2: AUTO-ZOOM SPOTLIGHT AUDIT MODAL ==================== -->
+    <div id="auditModal" class="fixed inset-0 z-50 bg-[#2A2421]/50 backdrop-blur-xs hidden flex items-center justify-center p-3" onclick="if(event.target === this) closeAuditModal()">
+      <div class="w-full max-w-md bg-[#FFFFFF] border border-[#DDD5C7] rounded-3xl overflow-hidden shadow-2xl flex flex-col max-h-[85vh]">
+        
+        <!-- Modal Header -->
+        <div class="p-3.5 bg-[#F9F6F0] border-b border-[#EBE4D8] flex items-center justify-between">
+          <div>
+            <div class="text-xs font-semibold text-[#6D655E]">ตรวจสอบภาพถ่ายต้นฉบับ</div>
+            <div class="text-sm font-bold text-[#2A2421] font-mono flex items-center gap-2 mt-0.5">
+              <span id="auditNumTag" class="text-[#2D6A4F] font-bold">-</span>
+              <span id="auditSubMeta" class="text-xs font-normal text-[#7D756D] font-sans">-</span>
+            </div>
+          </div>
+          <button onclick="closeAuditModal()" class="w-7 h-7 rounded-xl bg-[#EAE4D8] text-[#7D756D] hover:text-[#2A2421] flex items-center justify-center text-xs cursor-pointer">✕</button>
         </div>
 
-        <h3 style="margin:16px 0 10px 0; font-size:16px; color:#0f172a;">👥 สถิติการส่งงานแยกรายพนักงาน</h3>
-        <div class="table-container">
-            <table>
-                <thead>
-                    <tr>
-                        <th style="width:80px; text-align:center;">รหัส</th>
-                        <th>ชื่อพนักงาน</th>
-                        <th style="text-align:right;">จำนวนแผ่นที่บันทึกสำเร็จ</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {workers_html}
-                </tbody>
-            </table>
-        </div>
-    </div>
+        <!-- Viewport -->
+        <div class="p-3.5 space-y-3 flex-1 overflow-hidden flex flex-col">
+          <div class="flex items-center justify-between text-xs text-[#6D655E]">
+            <span class="font-medium">ตำแหน่งบนกระดาษโพยจริง</span>
+            <div class="flex items-center gap-2">
+              <span id="auditZoomIndicator" class="font-mono text-[#7D756D]">ซูม 250%</span>
+              <button type="button" onclick="zoomAudit(0.4)" class="px-1.5 py-0.5 rounded bg-[#F0EBE1] text-[#2A2421] text-xs font-bold border border-[#DFD8CC]">➕</button>
+              <button type="button" onclick="zoomAudit(-0.4)" class="px-1.5 py-0.5 rounded bg-[#F0EBE1] text-[#2A2421] text-xs font-bold border border-[#DFD8CC]">➖</button>
+              <button type="button" onclick="resetAuditZoom()" class="px-1.5 py-0.5 rounded bg-[#F0EBE1] text-[#2A2421] text-xs border border-[#DFD8CC]">🔄</button>
+              <a id="auditFullLink" href="#" target="_blank" class="px-2 py-0.5 rounded bg-[#F0EBE1] text-[#2A2421] text-xs border border-[#DFD8CC] text-decoration-none">เต็มจอ</a>
+            </div>
+          </div>
 
-    <div class="footer-note">
-        💡 ระบบเชื่อมต่อกับ LINE Official Account: พนักงานส่งรูปถ่ายได้เมื่อสถานะเป็น "กำลังเปิดรับข้อมูล"
-    </div>
-
-    <script>
-        function switchTab(tabId) {{
-            document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-            document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+          <!-- Canvas / Viewport Simulation -->
+          <div id="auditViewport" class="relative w-full h-64 bg-[#EBE5DB] border border-[#DDD5C7] rounded-2xl overflow-hidden flex items-center justify-center" style="cursor: grab;">
             
-            const btn = document.getElementById('btn-tab-' + tabId);
-            const content = document.getElementById('tab-' + tabId);
-            if (btn && content) {{
-                btn.classList.add('active');
-                content.classList.add('active');
-            }}
+            <div id="auditZoomContainer" style="position: absolute; transform-origin: 0 0; transition: transform 0.1s ease-out;">
+              <img id="auditImg" src="" alt="Sheet Photo" style="display: block; max-width: none; border-radius: 4px;" onload="onAuditImageLoaded()">
+              <div id="auditSpotlightRing" class="spotlight-box" style="position: absolute; display: none; pointer-events: none;"></div>
+            </div>
+
+            <div id="auditEmptyPlaceholder" style="display: none; padding: 40px 16px; text-align: center;">
+              <div style="font-size: 36px; margin-bottom: 8px;">📷</div>
+              <div style="font-size: 14px; font-weight: 700; color: #2A2421;">ไม่มีไฟล์ภาพถ่ายในเซิร์ฟเวอร์</div>
+              <div style="font-size: 11px; color: #7D756D; margin-top: 4px;">ข้อมูลนี้อาจส่งมาทางแชทข้อความโดยตรง หรือเป็นข้อมูลทดสอบ</div>
+            </div>
+
+            <div class="absolute bottom-2 text-[10px] text-[#2A2421] bg-[#FFFFFF]/90 px-2.5 py-0.5 rounded-lg border border-[#DDD5C7] shadow-xs pointer-events-none">
+              ตำแหน่งจริงบนกระดาษ
+            </div>
+          </div>
+
+          <div id="auditBraceBanner" class="hidden p-2.5 rounded-2xl bg-[#FDF2EA] border border-[#F7DFD2] text-xs text-[#A35C2B] flex items-center gap-2">
+            <span class="w-2 h-2 rounded-full bg-[#D97736]"></span>
+            <span id="auditBraceDesc">ตัวเลขนี้อยู่ในกลุ่มปีกการ่วมกัน</span>
+          </div>
+
+          <button onclick="closeAuditModal()" class="w-full py-2.5 bg-[#3A7D58] hover:bg-[#326C4C] text-[#FFFFFF] font-bold text-xs rounded-2xl shadow-xs transition-all cursor-pointer">
+            ตกลง / ปิดหน้าต่าง
+          </button>
+        </div>
+
+      </div>
+    </div>
+
+  </div>
+
+  <!-- Toast element -->
+  <div id="toast" class="fixed top-4 z-50 bg-[#2A2421] text-[#F9F6F0] text-xs px-4 py-2 rounded-2xl shadow-lg opacity-0 transform -translate-y-3 transition-all pointer-events-none">
+    ข้อความแจ้งเตือน
+  </div>
+
+  <script>
+    var allEntries = {search_json};
+    var currentAuditScale = 1.0;
+    var currentAuditX = 0;
+    var currentAuditY = 0;
+    var isPanningAudit = false;
+    var panStartX = 0;
+    var panStartY = 0;
+    var auditBoxCoords = null;
+
+    function togglePhoneFrame() {{
+      var app = document.getElementById('appContainer');
+      var txt = document.getElementById('frameText');
+      if (app.classList.contains('phone-frame')) {{
+        app.classList.remove('phone-frame');
+        app.classList.add('max-w-4xl', 'rounded-3xl', 'shadow-sm');
+        if (txt) txt.innerText = 'สลับดูแบบจอมือถือ (Mobile)';
+      }} else {{
+        app.classList.add('phone-frame');
+        app.classList.remove('max-w-4xl', 'rounded-3xl', 'shadow-sm');
+        if (txt) txt.innerText = 'สลับดูแบบเต็มจอ (Desktop)';
+      }}
+    }}
+
+    function switchTab(tabId) {{
+      ['overview', 'table', 'prizes', 'admin'].forEach(function(t) {{
+        var el = document.getElementById('tab-content-' + t);
+        if (el) el.classList.add('hidden');
+        var btn = document.getElementById('nav-btn-' + t);
+        if (btn) {{
+          btn.classList.remove('text-[#2D6A4F]');
+          btn.classList.add('text-[#9E968D]');
         }}
+      }});
 
-        // Read active tab from URL query
-        const urlParams = new URLSearchParams(window.location.search);
-        const requestedTab = urlParams.get('tab') || '{active_tab}';
-        if (requestedTab && requestedTab !== 'live') {{
-            switchTab(requestedTab);
+      var target = document.getElementById('tab-content-' + tabId);
+      if (target) target.classList.remove('hidden');
+
+      var activeBtn = document.getElementById('nav-btn-' + tabId);
+      if (activeBtn) {{
+        activeBtn.classList.remove('text-[#9E968D]');
+        activeBtn.classList.add('text-[#2D6A4F]');
+      }}
+
+      window.scrollTo({{ top: 0, behavior: 'smooth' }});
+    }}
+
+    function filterCol(col) {{
+      var btns = ['btnColAll', 'btnColTop', 'btnColBot', 'btnColTopBot'];
+      btns.forEach(function(id) {{
+        var b = document.getElementById(id);
+        if (b) {{
+          b.classList.remove('bg-[#FFFFFF]', 'text-[#2A2421]', 'border', 'border-[#DDD5C7]', 'shadow-xs', 'font-semibold');
+          b.classList.add('text-[#6D655E]', 'font-medium');
         }}
+      }});
 
-        function filterTable() {{
-            var input = document.getElementById('searchInput');
-            var filter = input.value.toUpperCase();
-            var rows = document.getElementsByClassName('entry-row');
-            for (var i = 0; i < rows.length; i++) {{
-                var rowText = rows[i].innerText || rows[i].textContent;
-                if (rowText.toUpperCase().indexOf(filter) > -1) {{
-                    rows[i].style.display = "";
-                }} else {{
-                    rows[i].style.display = "none";
-                }}
-            }}
+      var activeId = col === 'all' ? 'btnColAll' : (col === 'บน' ? 'btnColTop' : (col === 'ล่าง' ? 'btnColBot' : 'btnColTopBot'));
+      var act = document.getElementById(activeId);
+      if (act) {{
+        act.classList.add('bg-[#FFFFFF]', 'text-[#2A2421]', 'border', 'border-[#DDD5C7]', 'shadow-xs', 'font-semibold');
+        act.classList.remove('text-[#6D655E]', 'font-medium');
+      }}
+
+      var rows = document.querySelectorAll('.row-entry');
+      rows.forEach(function(r) {{
+        if (col === 'all') {{
+          r.style.display = 'flex';
+        }} else {{
+          var cat = r.getAttribute('data-cat') || '';
+          r.style.display = (cat === col) ? 'flex' : 'none';
         }}
+      }});
+      showToast('กรองตาราง: ' + (col === 'all' ? 'ทุกหมวด' : col));
+    }}
 
-        function closeDeepSearch() {{
-            var resBox = document.getElementById("deepSearchResult");
-            if (resBox) resBox.style.display = "none";
+    function openSearchModal() {{
+      var modal = document.getElementById('searchModal');
+      if (modal) modal.classList.remove('hidden');
+      var inp = document.getElementById('instantSearchInput');
+      if (inp) {{
+        inp.focus();
+        inp.select();
+      }}
+      renderQuickPills();
+      doSearch();
+    }}
+
+    function closeSearchModal() {{
+      var modal = document.getElementById('searchModal');
+      if (modal) modal.classList.add('hidden');
+    }}
+
+    function renderQuickPills() {{
+      var pillsBox = document.getElementById('searchQuickPills');
+      if (!pillsBox) return;
+      var topNums = [];
+      var seen = {{}};
+      for (var i = 0; i < allEntries.length; i++) {{
+        var n = allEntries[i].num;
+        if (n && !seen[n]) {{
+          seen[n] = true;
+          topNums.push(n);
+          if (topNums.length >= 4) break;
         }}
+      }}
+      var html = '<span class="text-[#7D756D] text-[11px]">ตัวอย่าง:</span>';
+      topNums.forEach(function(num) {{
+        html += '<button onclick="setSearchNum(\\'' + num + '\\')" class="px-2 py-0.5 rounded-xl bg-[#E8F3EB] text-[#2D6A4F] font-mono text-xs border border-[#CFE4D4] cursor-pointer">' + num + '</button>';
+      }});
+      pillsBox.innerHTML = html;
+    }}
 
-        async function executeDeepSearch() {{
-            var q = document.getElementById('searchInput').value.trim();
-            var resBox = document.getElementById('deepSearchResult');
-            if (!q) {{
-                alert('กรุณาพิมพ์เลขที่ต้องการค้นหาก่อน เช่น 401 หรือ 12');
-                return;
-            }}
-            resBox.style.display = 'block';
-            resBox.innerHTML = '<div style="text-align:center; padding:12px; color:#64748b;">⏳ กำลังสแกนค้นหาเลข ' + q + ' ในทุกใบของงวดนี้...</div>';
-            
-            try {{
-                const resp = await fetch('/api/search?q=' + encodeURIComponent(q) + '&period_id={p_id}');
-                const data = await resp.json();
-                
-                if (!data.matches || data.matches.length === 0) {{
-                    resBox.innerHTML = '<div style="display:flex; justify-content:space-between; align-items:center;">' +
-                        '<span style="font-weight:700; color:#dc2626;">❌ ไม่พบเลข "' + data.query + '" ในงวดนี้</span>' +
-                        '<button onclick="closeDeepSearch()" style="background:none; border:none; font-size:16px; cursor:pointer; color:#94a3b8;">✕ ปิด</button>' +
-                    '</div>';
-                    return;
-                }}
-                
-                let matchesHtml = data.matches.map(function(m) {{
-                    let imgHtml = m.image_path ? '<a href="' + m.image_path + '" target="_blank" style="background:#eff6ff; color:#2563eb; padding:4px 10px; border-radius:6px; font-size:12px; font-weight:700; text-decoration:none; border:1px solid #bfdbfe;">📷 ดูรูปหลักฐาน</a>' : '<span style="color:#94a3b8; font-size:12px;">ไม่มีรูป</span>';
-                    let s3Html = m.set3 ? ' <small style="color:#d97706">(' + m.set3 + ')</small>' : '';
-                    return '<tr style="border-bottom:1px solid #f1f5f9;">' +
-                        '<td style="padding:8px 12px; font-weight:700; color:#0f172a;">ใบที่ ' + m.sheet_id + ' (' + (m.worker_code || m.employee_name) + ')</td>' +
-                        '<td style="padding:8px 12px;"><span style="background:#e0e7ff; color:#3730a3; padding:2px 8px; border-radius:6px; font-size:12px; font-weight:700;">' + m.category + '</span></td>' +
-                        '<td style="padding:8px 12px; font-size:16px; font-weight:800; color:#2563eb;">' + m.set1 + '</td>' +
-                        '<td style="padding:8px 12px; font-weight:700; color:#059669;">' + m.set2 + s3Html + '</td>' +
-                        '<td style="padding:8px 12px; text-align:right;">' + imgHtml + '</td>' +
-                    '</tr>';
-                }}).join('');
+    function setSearchNum(n) {{
+      var inp = document.getElementById('instantSearchInput');
+      if (inp) inp.value = n;
+      doSearch();
+    }}
 
-                resBox.innerHTML = '<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">' +
-                    '<div>' +
-                        '<span style="font-size:18px; font-weight:800; color:#1e40af;">🔍 ผลการเจาะลึกเลข "' + data.query + '"</span>' +
-                        '<span style="margin-left:8px; font-size:13px; color:#64748b;">(พบทั้งหมด <b>' + data.total_count + '</b> จุด | ยอดรวม <b>' + Number(data.total_volume).toLocaleString() + '</b> บาท)</span>' +
+    function quickSearchNum(n) {{
+      openSearchModal();
+      setSearchNum(n);
+    }}
+
+    function doSearch() {{
+      var query = (document.getElementById('instantSearchInput').value || '').trim();
+      var box = document.getElementById('searchResultsBox');
+      if (!box) return;
+
+      if (!query) {{
+        box.innerHTML = '<div class="text-center py-5 text-[#8A8279] text-xs">พิมพ์ตัวเลขเพื่อค้นหาในงวดนี้ (' + allEntries.length + ' รายการ)</div>';
+        return;
+      }}
+
+      var filtered = allEntries.filter(function(item) {{
+        return item.num.indexOf(query) !== -1;
+      }});
+
+      if (filtered.length === 0) {{
+        box.innerHTML = '<div class="text-center py-5 text-[#8A8279] text-xs">ไม่พบตัวเลข ' + query + ' ในงวดนี้</div>';
+        return;
+      }}
+
+      var sumTotal = 0;
+      filtered.forEach(function(item) {{
+        var p = parseFloat((item.price || '').replace(/[^0-9.]/g, '')) || 0;
+        sumTotal += p;
+      }});
+
+      var html = '<div class="text-[11px] text-[#7D756D] mb-1 font-medium flex items-center justify-between">' +
+                    '<span>พบ ' + filtered.length + ' รายการ</span>' +
+                    '<span class="font-mono text-[#2D6A4F] font-bold">รวม ' + sumTotal.toLocaleString() + ' ฿</span>' +
+                 '</div>';
+
+      filtered.forEach(function(item) {{
+        var catClass = item.cat === 'บน' ? 'text-[#2D6A4F]' : (item.cat === 'ล่าง' ? 'text-[#6B5384]' : 'text-[#A35C2B]');
+        var rawJson = JSON.stringify(item).replace(/"/g, '&quot;');
+        html += '<div class="p-2.5 rounded-2xl bg-[#F9F6F0] border border-[#EAE3D8] flex items-center justify-between text-xs">' +
+                  '<div>' +
+                    '<div class="flex items-baseline gap-1.5 font-mono text-xs font-bold text-[#2A2421]">' +
+                      '<span>' + item.num + '</span>' +
+                      '<span class="text-[#A8A095] font-sans">=</span>' +
+                      '<span class="text-[#2D6A4F]">' + item.price + '</span>' +
                     '</div>' +
-                    '<button onclick="closeDeepSearch()" style="background:#f1f5f9; border:none; border-radius:6px; padding:4px 10px; font-size:13px; cursor:pointer; color:#475569; font-weight:700;">✕ ปิดหน้าต่างนี้</button>' +
-                '</div>' +
-                '<div style="display:flex; gap:8px; margin-bottom:12px; flex-wrap:wrap;">' +
-                    '<span style="background:#eff6ff; color:#1d4ed8; padding:4px 10px; border-radius:6px; font-size:12px; font-weight:700;">บน: ' + (data.cat_breakdown['บน'] || 0) + '</span>' +
-                    '<span style="background:#fef2f2; color:#b91c1c; padding:4px 10px; border-radius:6px; font-size:12px; font-weight:700;">ล่าง: ' + (data.cat_breakdown['ล่าง'] || 0) + '</span>' +
-                    '<span style="background:#f5f3ff; color:#6d28d9; padding:4px 10px; border-radius:6px; font-size:12px; font-weight:700;">บนล่าง: ' + (data.cat_breakdown['บนล่าง'] || 0) + '</span>' +
-                '</div>' +
-                '<div style="max-height:280px; overflow-y:auto; border:1px solid #e2e8f0; border-radius:8px;">' +
-                    '<table style="width:100%; border-collapse:collapse; font-size:13px;">' +
-                        '<thead style="background:#f8fafc; position:sticky; top:0;">' +
-                            '<tr>' +
-                                '<th style="padding:8px 12px; text-align:left;">ใบที่ / ผู้ส่ง</th>' +
-                                '<th style="padding:8px 12px; text-align:left;">หมวด</th>' +
-                                '<th style="padding:8px 12px; text-align:left;">เลขชุด 1</th>' +
-                                '<th style="padding:8px 12px; text-align:left;">ยอด (Set 2)</th>' +
-                                '<th style="padding:8px 12px; text-align:right;">หลักฐาน</th>' +
-                            '</tr>' +
-                        '</thead>' +
-                        '<tbody>' +
-                            matchesHtml +
-                        '</tbody>' +
-                    '</table>' +
+                    '<div class="text-[10px] text-[#7D756D] mt-0.5">' +
+                      '<span class="' + catClass + ' font-medium">[' + item.cat + ']</span> • ใบที่ ' + item.sheet + ' (' + item.worker + ')' +
+                    '</div>' +
+                  '</div>' +
+                  '<button onclick="closeSearchModal(); inspectItemDirect(' + rawJson + ')" class="text-xs font-medium text-[#4A423B] hover:text-[#2A2421] bg-[#FFFFFF] px-2.5 py-1 rounded-xl border border-[#DDD5C7] shadow-xs cursor-pointer transition-colors">' +
+                    'ส่องภาพ' +
+                  '</button>' +
                 '</div>';
-            }} catch (err) {{
-                resBox.innerHTML = '<div style="color:#dc2626; padding:10px;">❌ เกิดข้อผิดพลาดในการดึงข้อมูล: ' + err.message + '</div>';
-            }}
+      }});
+
+      box.innerHTML = html;
+    }}
+
+    function inspectItemDirect(item) {{
+      var fakeEl = {{
+        getAttribute: function(attr) {{
+          if (attr === 'data-num') return item.num + ' = ' + item.price;
+          if (attr === 'data-sheet') return item.sheet;
+          if (attr === 'data-worker') return item.worker;
+          if (attr === 'data-catname') return '[' + item.cat + ']';
+          if (attr === 'data-time') return item.time;
+          if (attr === 'data-img') return item.img;
+          if (attr === 'data-box') return item.box;
+          if (attr === 'data-note') return item.note;
+          return '';
         }}
+      }};
+      openAuditSpotlight(fakeEl);
+    }}
 
-        var currentAuditScale = 2.5;
-        var currentAuditX = 0;
-        var currentAuditY = 0;
-        var auditBoxCoords = null;
-        var isPanningAudit = false;
-        var panStartX = 0, panStartY = 0;
+    function openAuditSpotlight(el) {{
+      var num = el.getAttribute('data-num') || '';
+      var sheet = el.getAttribute('data-sheet') || '';
+      var worker = el.getAttribute('data-worker') || '';
+      var cat = el.getAttribute('data-catname') || '';
+      var timeStr = el.getAttribute('data-time') || '';
+      var img = el.getAttribute('data-img') || '';
+      var box = el.getAttribute('data-box') || '';
+      var note = el.getAttribute('data-note') || '';
 
-        function openAuditSpotlight(el) {{
-            var num = el.getAttribute('data-num') || '';
-            var sheet = el.getAttribute('data-sheet') || '';
-            var worker = el.getAttribute('data-worker') || '';
-            var cat = el.getAttribute('data-cat') || '';
-            var time = el.getAttribute('data-time') || '';
-            var img = el.getAttribute('data-img') || '';
-            var box = el.getAttribute('data-box') || '';
-            var note = el.getAttribute('data-note') || '';
+      document.getElementById('auditNumTag').innerText = num;
+      document.getElementById('auditSubMeta').innerText = 'ใบที่ ' + sheet + ' • ' + cat + ' • ' + worker;
 
-            document.getElementById('auditNumTag').innerText = num;
-            document.getElementById('auditSheetId').innerText = sheet;
-            document.getElementById('auditWorker').innerText = worker;
-            document.getElementById('auditCat').innerText = cat;
-            document.getElementById('auditTime').innerText = time;
+      var banner = document.getElementById('auditBraceBanner');
+      if (note && note.indexOf('ปีกกา') !== -1) {{
+        document.getElementById('auditBraceDesc').innerText = note;
+        banner.classList.remove('hidden');
+      }} else {{
+        banner.classList.add('hidden');
+      }}
 
-            var braceBox = document.getElementById('auditBraceBanner');
-            if (note && note.indexOf('ปีกกา') !== -1) {{
-                braceBox.style.display = 'flex';
-                document.getElementById('auditBraceTitle').innerText = '🔗 ตรวจพบปีกการ่วมกัน: ' + note;
-                document.getElementById('auditBraceDesc').innerText = 'ตัวเลขนี้อยู่ในกลุ่มปีกกาเดียวกัน มีการกำกับลำดับเพื่อความถูกต้องในการนับยอด';
-            }} else {{
-                braceBox.style.display = 'none';
-            }}
-
-            try {{
-                auditBoxCoords = box ? JSON.parse(box) : null;
-            }} catch(e) {{
-                auditBoxCoords = null;
-            }}
-
-            var modal = document.getElementById('auditModal');
-            modal.style.display = 'flex';
-            document.body.style.overflow = 'hidden';
-
-            var imgEl = document.getElementById('auditImg');
-            var placeholderEl = document.getElementById('auditEmptyPlaceholder');
-            var zoomContainer = document.getElementById('auditZoomContainer');
-            var fullLink = document.getElementById('auditFullLink');
-            var zoomIndicator = document.getElementById('auditZoomIndicator');
-
-            imgEl.onerror = function() {{
-                zoomContainer.style.display = 'none';
-                placeholderEl.style.display = 'block';
-                if (fullLink) fullLink.style.display = 'none';
-                if (zoomIndicator) zoomIndicator.innerText = 'ไม่มีไฟล์ภาพ';
-            }};
-
-            if (!img || img === '#' || img.trim() === '') {{
-                zoomContainer.style.display = 'none';
-                placeholderEl.style.display = 'block';
-                if (fullLink) fullLink.style.display = 'none';
-                if (zoomIndicator) zoomIndicator.innerText = 'ไม่มีไฟล์ภาพ';
-            }} else {{
-                zoomContainer.style.display = 'block';
-                placeholderEl.style.display = 'none';
-                if (fullLink) {{
-                    fullLink.style.display = 'inline-flex';
-                    fullLink.href = img;
-                }}
-                if (zoomIndicator) zoomIndicator.innerText = 'ซูม ' + Math.round(currentAuditScale * 100) + '%';
-                imgEl.src = img;
-                if (imgEl.complete && imgEl.naturalWidth > 0) {{
-                    onAuditImageLoaded();
-                }}
-            }}
+      auditBoxCoords = null;
+      if (box && box.trim()) {{
+        try {{
+          var cleanBox = box.replace(/[\[\]]/g, '').trim();
+          var parts = cleanBox.split(',').map(function(p) {{ return parseFloat(p.trim()); }});
+          if (parts.length === 4 && !parts.some(isNaN)) {{
+            auditBoxCoords = parts;
+          }}
+        }} catch(e) {{
+          console.error(e);
         }}
+      }}
 
-        function onAuditImageLoaded() {{
-            var vp = document.getElementById('auditViewport');
-            var ring = document.getElementById('auditSpotlightRing');
-            var imgEl = document.getElementById('auditImg');
-            var zoomContainer = document.getElementById('auditZoomContainer');
-            var placeholderEl = document.getElementById('auditEmptyPlaceholder');
-            var fullLink = document.getElementById('auditFullLink');
+      var imgEl = document.getElementById('auditImg');
+      var placeholderEl = document.getElementById('auditEmptyPlaceholder');
+      var zoomCont = document.getElementById('auditZoomContainer');
+      var fullLink = document.getElementById('auditFullLink');
 
-            zoomContainer.style.display = 'block';
-            placeholderEl.style.display = 'none';
-            if (fullLink) fullLink.style.display = 'inline-flex';
-            
-            if (auditBoxCoords && auditBoxCoords.length === 4) {{
-                var ymin = auditBoxCoords[0];
-                var xmin = auditBoxCoords[1];
-                var ymax = auditBoxCoords[2];
-                var xmax = auditBoxCoords[3];
-                currentAuditScale = 2.5;
-                
-                ring.style.top = (ymin / 10.0) + '%';
-                ring.style.left = (xmin / 10.0) + '%';
-                ring.style.height = ((ymax - ymin) / 10.0) + '%';
-                ring.style.width = ((xmax - xmin) / 10.0) + '%';
-                ring.style.display = 'block';
-
-                var vpW = vp.clientWidth || 640;
-                var vpH = vp.clientHeight || 360;
-                var imgW = imgEl.clientWidth || 600;
-                var imgH = imgEl.clientHeight || 800;
-
-                var targetX = ((xmin + xmax) / 2000.0) * imgW;
-                var targetY = ((ymin + ymax) / 2000.0) * imgH;
-
-                currentAuditX = (vpW / 2) - (targetX * currentAuditScale);
-                currentAuditY = (vpH / 2) - (targetY * currentAuditScale);
-            }} else {{
-                currentAuditScale = 1.0;
-                currentAuditX = 0;
-                currentAuditY = 0;
-                ring.style.display = 'none';
-            }}
-            applyAuditTransform();
+      if (img && img.trim()) {{
+        placeholderEl.style.display = 'none';
+        zoomCont.style.display = 'block';
+        imgEl.src = img;
+        if (fullLink) {{
+          fullLink.href = img;
+          fullLink.style.display = 'inline-block';
         }}
+      }} else {{
+        zoomCont.style.display = 'none';
+        placeholderEl.style.display = 'block';
+        if (fullLink) fullLink.style.display = 'none';
+      }}
 
-        function applyAuditTransform() {{
-            var cont = document.getElementById('auditZoomContainer');
-            if (cont) {{
-                cont.style.transform = 'translate(' + currentAuditX + 'px, ' + currentAuditY + 'px) scale(' + currentAuditScale + ')';
-            }}
-            var ind = document.getElementById('auditZoomIndicator');
-            if (ind) {{
-                ind.innerText = 'ซูม ' + Math.round(currentAuditScale * 100) + '%';
-            }}
+      document.getElementById('auditModal').classList.remove('hidden');
+      document.body.style.overflow = 'hidden';
+    }}
+
+    function onAuditImageLoaded() {{
+      var vp = document.getElementById('auditViewport');
+      var ring = document.getElementById('auditSpotlightRing');
+      var imgEl = document.getElementById('auditImg');
+      var zoomCont = document.getElementById('auditZoomContainer');
+
+      zoomCont.style.display = 'block';
+      
+      if (auditBoxCoords && auditBoxCoords.length === 4) {{
+        var ymin = auditBoxCoords[0];
+        var xmin = auditBoxCoords[1];
+        var ymax = auditBoxCoords[2];
+        var xmax = auditBoxCoords[3];
+        currentAuditScale = 2.5;
+
+        ring.style.top = (ymin / 10.0) + '%';
+        ring.style.left = (xmin / 10.0) + '%';
+        ring.style.height = ((ymax - ymin) / 10.0) + '%';
+        ring.style.width = ((xmax - xmin) / 10.0) + '%';
+        ring.style.display = 'block';
+
+        var vpW = vp.clientWidth || 400;
+        var vpH = vp.clientHeight || 250;
+        var imgW = imgEl.clientWidth || 400;
+        var imgH = imgEl.clientHeight || 600;
+
+        var targetX = ((xmin + xmax) / 2000.0) * imgW;
+        var targetY = ((ymin + ymax) / 2000.0) * imgH;
+
+        currentAuditX = (vpW / 2) - (targetX * currentAuditScale);
+        currentAuditY = (vpH / 2) - (targetY * currentAuditScale);
+      }} else {{
+        currentAuditScale = 1.0;
+        currentAuditX = 0;
+        currentAuditY = 0;
+        ring.style.display = 'none';
+      }}
+      applyAuditTransform();
+    }}
+
+    function applyAuditTransform() {{
+      var cont = document.getElementById('auditZoomContainer');
+      if (cont) {{
+        cont.style.transform = 'translate(' + currentAuditX + 'px, ' + currentAuditY + 'px) scale(' + currentAuditScale + ')';
+      }}
+      var ind = document.getElementById('auditZoomIndicator');
+      if (ind) {{
+        ind.innerText = 'ซูม ' + Math.round(currentAuditScale * 100) + '%';
+      }}
+    }}
+
+    function zoomAudit(delta) {{
+      currentAuditScale = Math.max(0.5, Math.min(6.0, currentAuditScale + delta));
+      applyAuditTransform();
+    }}
+
+    function resetAuditZoom() {{
+      currentAuditScale = 1.0;
+      currentAuditX = 0;
+      currentAuditY = 0;
+      applyAuditTransform();
+    }}
+
+    function closeAuditModal() {{
+      var modal = document.getElementById('auditModal');
+      if (modal) modal.classList.add('hidden');
+      document.body.style.overflow = '';
+    }}
+
+    function showToast(msg) {{
+      var toast = document.getElementById('toast');
+      if (!toast) return;
+      toast.innerText = msg;
+      toast.classList.remove('opacity-0', '-translate-y-3');
+      toast.classList.add('opacity-100', 'translate-y-0');
+      setTimeout(function() {{
+        toast.classList.remove('opacity-100', 'translate-y-0');
+        toast.classList.add('opacity-0', '-translate-y-3');
+      }}, 2000);
+    }}
+
+    // Mouse & Touch Pan Listeners for Spotlight Canvas
+    window.addEventListener('DOMContentLoaded', function() {{
+      var vp = document.getElementById('auditViewport');
+      if (!vp) return;
+
+      vp.addEventListener('mousedown', function(e) {{
+        isPanningAudit = true;
+        panStartX = e.clientX - currentAuditX;
+        panStartY = e.clientY - currentAuditY;
+        vp.style.cursor = 'grabbing';
+      }});
+
+      window.addEventListener('mousemove', function(e) {{
+        if (!isPanningAudit) return;
+        currentAuditX = e.clientX - panStartX;
+        currentAuditY = e.clientY - panStartY;
+        applyAuditTransform();
+      }});
+
+      window.addEventListener('mouseup', function() {{
+        isPanningAudit = false;
+        if (vp) vp.style.cursor = 'grab';
+      }});
+
+      vp.addEventListener('touchstart', function(e) {{
+        if (e.touches.length === 1) {{
+          isPanningAudit = true;
+          panStartX = e.touches[0].clientX - currentAuditX;
+          panStartY = e.touches[0].clientY - currentAuditY;
         }}
+      }}, {{ passive: true }});
 
-        function zoomAudit(delta) {{
-            currentAuditScale = Math.max(0.5, Math.min(6.0, currentAuditScale + delta));
-            applyAuditTransform();
-        }}
+      window.addEventListener('touchmove', function(e) {{
+        if (!isPanningAudit || e.touches.length !== 1) return;
+        currentAuditX = e.touches[0].clientX - panStartX;
+        currentAuditY = e.touches[0].clientY - panStartY;
+        applyAuditTransform();
+      }}, {{ passive: true }});
 
-        function resetAuditZoom() {{
-            currentAuditScale = 1.0;
-            currentAuditX = 0;
-            currentAuditY = 0;
-            applyAuditTransform();
-        }}
+      window.addEventListener('touchend', function() {{
+        isPanningAudit = false;
+      }});
 
-        function closeAuditModal() {{
-            var modal = document.getElementById('auditModal');
-            if (modal) modal.style.display = 'none';
-            document.body.style.overflow = '';
-        }}
-
-        window.addEventListener('DOMContentLoaded', function() {{
-            var vp = document.getElementById('auditViewport');
-            if (!vp) return;
-            vp.addEventListener('mousedown', function(e) {{
-                isPanningAudit = true;
-                panStartX = e.clientX - currentAuditX;
-                panStartY = e.clientY - currentAuditY;
-                vp.style.cursor = 'grabbing';
-            }});
-            window.addEventListener('mousemove', function(e) {{
-                if (!isPanningAudit) return;
-                currentAuditX = e.clientX - panStartX;
-                currentAuditY = e.clientY - panStartY;
-                applyAuditTransform();
-            }});
-            window.addEventListener('mouseup', function() {{
-                isPanningAudit = false;
-                if (vp) vp.style.cursor = 'grab';
-            }});
-            window.addEventListener('keydown', function(e) {{
-                if (e.key === 'Escape') closeAuditModal();
-            }});
-        }});
-    </script>
-
-    <!-- Traceability & Auto-Zoom Spotlight Modal -->
-    <div id="auditModal" class="audit-modal-backdrop" onclick="if(event.target === this) closeAuditModal();">
-        <div class="audit-modal-card">
-            <div class="audit-modal-header">
-                <div style="display:flex; align-items:center; gap:10px;">
-                    <span style="font-size:22px;">🔍</span>
-                    <div>
-                        <div style="font-size:16px; font-weight:800; color:white; display:flex; align-items:center; gap:8px;">
-                            <span>ตรวจสอบที่มาของตัวเลข:</span>
-                            <span id="auditNumTag" class="audit-num-pill">-</span>
-                        </div>
-                        <div style="font-size:12px; color:#94a3b8; margin-top:2px;">ตรวจสอบย้อนกลับไปยังภาพถ่ายกระดาษโพยของจริง</div>
-                    </div>
-                </div>
-                <button type="button" class="audit-modal-close" onclick="closeAuditModal()">✕</button>
-            </div>
-            
-            <div class="audit-modal-body">
-                <!-- Metadata Grid -->
-                <div class="audit-meta-grid">
-                    <div class="audit-meta-cell">
-                        <div class="audit-meta-lbl">📋 มาจากใบที่</div>
-                        <div id="auditSheetId" class="audit-meta-val" style="color:#38bdf8;">-</div>
-                    </div>
-                    <div class="audit-meta-cell">
-                        <div class="audit-meta-lbl">👤 ผู้ส่งรูป</div>
-                        <div id="auditWorker" class="audit-meta-val" style="color:white;">-</div>
-                    </div>
-                    <div class="audit-meta-cell">
-                        <div class="audit-meta-lbl">📂 หมวดหมู่</div>
-                        <div id="auditCat" class="audit-meta-val" style="color:#fbbf24;">-</div>
-                    </div>
-                    <div class="audit-meta-cell">
-                        <div class="audit-meta-lbl">⏰ เวลาที่ส่ง</div>
-                        <div id="auditTime" class="audit-meta-val" style="color:#cbd5e1; font-size:12px;">-</div>
-                    </div>
-                </div>
-
-                <!-- Brace Group Info Banner -->
-                <div id="auditBraceBanner" class="audit-brace-box" style="display:none;">
-                    <span style="font-size:18px;">🔗</span>
-                    <div>
-                        <div id="auditBraceTitle" style="font-weight:700; color:#e9d5ff;">ปีกการ่วมกัน</div>
-                        <div id="auditBraceDesc" style="font-size:12px; color:#d8b4fe; margin-top:2px;">รายการนี้ใช้ยอดเงินร่วมกับแถวอื่นๆ ในกลุ่มปีกกาเดียวกัน มีการกำกับลำดับเพื่อความถูกต้องในการนับยอด</div>
-                    </div>
-                </div>
-
-                <!-- Auto-Zoom Spotlight Image Viewport -->
-                <div style="margin-top:12px;">
-                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; flex-wrap:wrap; gap:6px;">
-                        <div style="font-size:13px; font-weight:700; color:#e2e8f0; display:flex; align-items:center; gap:6px;">
-                            <span>📷 ภาพถ่ายกระดาษต้นฉบับ</span>
-                            <span id="auditZoomIndicator" style="font-size:11px; background:#0284c7; color:white; padding:1px 6px; border-radius:4px;">ซูม 250%</span>
-                        </div>
-                        <div style="display:flex; gap:6px;">
-                            <button type="button" class="audit-ctrl-btn" onclick="zoomAudit(0.4)" title="ซูมเข้า">➕ ขยาย</button>
-                            <button type="button" class="audit-ctrl-btn" onclick="zoomAudit(-0.4)" title="ซูมออก">➖ ย่อ</button>
-                            <button type="button" class="audit-ctrl-btn" onclick="resetAuditZoom()" title="รีเซ็ต">🔄 รีเซ็ต</button>
-                            <a id="auditFullLink" href="#" target="_blank" class="audit-ctrl-btn" style="text-decoration:none;" title="เปิดภาพเต็มจอ">🔍 ภาพเต็มจอ</a>
-                        </div>
-                    </div>
-
-                    <div id="auditViewport" class="audit-viewport">
-                        <div id="auditZoomContainer" class="audit-zoom-container">
-                            <img id="auditImg" src="" alt="Sheet Photo" class="audit-sheet-img" onload="onAuditImageLoaded()">
-                            <div id="auditSpotlightRing" class="spotlight-ring" style="display:none;"></div>
-                        </div>
-                        <div id="auditEmptyPlaceholder" style="display:none; padding:45px 16px; text-align:center;">
-                            <div style="font-size:42px; margin-bottom:12px;">📷</div>
-                            <div style="font-size:16px; font-weight:700; color:#f1f5f9; margin-bottom:6px;">ไม่มีไฟล์ภาพถ่ายต้นฉบับในเซิร์ฟเวอร์</div>
-                            <div style="font-size:12px; color:#94a3b8; max-width:380px; margin:0 auto; line-height:1.6;">
-                                รายการนี้อาจเป็นข้อมูลทดสอบระบบ (TEST) หรือมาจากการพิมพ์ข้อความส่งเข้ามาทาง LINE โดยตรง จึงไม่มีไฟล์ภาพถ่ายจริงในระบบครับ
-                            </div>
-                        </div>
-                    </div>
-                    <div style="font-size:11px; color:#64748b; margin-top:6px; text-align:center;">
-                        💡 คลิกค้างแล้วลาก (Drag) เพื่อเลื่อนดูบริบทโดยรอบตำแหน่งตัวเลขได้อิสระ
-                    </div>
-                </div>
-            </div>
-
-            <div class="audit-modal-footer">
-                <span style="font-size:12px; color:#64748b;">✨ ตรวจสอบความถูกต้องได้ทุกตัวเลขในตาราง</span>
-                <button type="button" class="audit-btn-done" onclick="closeAuditModal()">ตกลง / ปิดหน้าต่าง</button>
-            </div>
-        </div>
-    </div>
+      window.addEventListener('keydown', function(e) {{
+        if (e.key === 'Escape') closeAuditModal();
+      }});
+    }});
+  </script>
 </body>
 </html>
 """

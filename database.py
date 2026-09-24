@@ -870,9 +870,19 @@ def get_period_financials(period_id: Optional[int] = None) -> Dict:
     total_entries = len(entries)
     total_inflow = 0.0
     inflow_by_category = {"บน": 0.0, "ล่าง": 0.0, "บนล่าง": 0.0}
+    count_by_category = {"บน": 0, "ล่าง": 0, "บนล่าง": 0}
+    digits_2_vol = 0.0
+    digits_2_cnt = 0
+    digits_3_vol = 0.0
+    digits_3_cnt = 0
+    digits_other_vol = 0.0
+    digits_other_cnt = 0
+    num_map = {}
     
     for e in entries:
         cat = e["category"] or ""
+        s1 = str(e["set1"] or "").strip()
+        s1_clean = re.sub(r'\D', '', s1)
         s2 = str(e["set2"] or "").strip().lower()
         vol = 0.0
         try:
@@ -887,17 +897,47 @@ def get_period_financials(period_id: Optional[int] = None) -> Dict:
         total_inflow += vol
         if cat in inflow_by_category:
             inflow_by_category[cat] += vol
+            count_by_category[cat] = count_by_category.get(cat, 0) + 1
         else:
             inflow_by_category[cat] = inflow_by_category.get(cat, 0.0) + vol
+            count_by_category[cat] = count_by_category.get(cat, 0) + 1
+
+        if len(s1_clean) == 2:
+            digits_2_vol += vol
+            digits_2_cnt += 1
+        elif len(s1_clean) == 3:
+            digits_3_vol += vol
+            digits_3_cnt += 1
+        else:
+            digits_other_vol += vol
+            digits_other_cnt += 1
+
+        if s1_clean:
+            if s1_clean not in num_map:
+                num_map[s1_clean] = {"number": s1_clean, "volume": 0.0, "count": 0, "cat": cat}
+            num_map[s1_clean]["volume"] += vol
+            num_map[s1_clean]["count"] += 1
             
     avg_per_sheet = (total_inflow / total_sheets) if total_sheets > 0 else 0.0
+    unique_employees = len(set(s["employee_name"] for s in sheets if s["employee_name"]))
+
+    top_numbers = sorted(num_map.values(), key=lambda x: (x["volume"], x["count"]), reverse=True)[:8]
     
     return {
         "period_id": period_id,
         "total_sheets": total_sheets,
+        "total_employees": unique_employees,
         "total_entries": total_entries,
         "total_inflow": total_inflow,
         "inflow_by_category": inflow_by_category,
+        "count_by_category": count_by_category,
+        "digits_2_volume": digits_2_vol,
+        "digits_2_count": digits_2_cnt,
+        "digits_3_volume": digits_3_vol,
+        "digits_3_count": digits_3_cnt,
+        "digits_other_volume": digits_other_vol,
+        "digits_other_count": digits_other_cnt,
+        "top_numbers": top_numbers,
         "avg_per_sheet": avg_per_sheet
     }
 
