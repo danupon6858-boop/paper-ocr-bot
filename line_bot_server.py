@@ -1374,83 +1374,838 @@ def handle_text_message(text: str, reply_token: str, user_id: str, is_owner: boo
     )
 
 # ==================== WEB DASHBOARD & QUICK-EDITOR ====================
-def render_edit_page(scan_id: int) -> str:
-    scan = database.get_pending_scan(scan_id)
-    if not scan:
-        return "<h3>❌ ไม่พบรายการนี้ หรือรายการนี้ถูกบันทึกไปแล้ว</h3>"
-    if scan["status"] != "PENDING":
-        return f"<h3>⚠️ รายการนี้อยู่ในสถานะ '{scan['status']}' แล้ว ไม่สามารถแก้ไขซ้ำได้</h3>"
-        
-    val_data = json.loads(scan["val_json"])
-    cols = val_data.get("validated_columns", {})
-    sheet_id = scan["sheet_id"]
-    emp_name = scan["emp_name"]
+def parse_columns_from_form(form: dict) -> dict:
+    new_columns = {"top": [], "bottom": [], "top_bottom": []}
+    pattern = re.compile(r"^(top|bottom|top_bottom)_set1_(\w+)$")
+    items_by_col = {"top": [], "bottom": [], "top_bottom": []}
     
-    # Render interactive input boxes
-    def render_inputs(items, col_name, col_key):
-        h = f"<div class='section-title'>{col_name} ({len(items)} รายการ)</div>"
-        if not items:
-            h += "<div style='color:#94a3b8; margin-bottom:10px;'>ไม่มีรายการในหมวดนี้</div>"
-        for idx, itm in enumerate(items):
-            s1 = itm.get('set1', '')
-            s3 = itm.get('set3', '')
-            s2 = itm.get('set2', '')
-            h += f"""
-            <div class="row-box">
-                <span class="row-idx">#{idx+1}</span>
-                <input type="text" name="{col_key}_set1_{idx}" value="{s1}" placeholder="ชุด 1" class="inp-set1">
-                <span>=</span>
-                <input type="text" name="{col_key}_set3_{idx}" value="{s3}" placeholder="ก3/ก6" class="inp-set3">
-                <input type="text" name="{col_key}_set2_{idx}" value="{s2}" placeholder="ชุด 2" class="inp-set2">
-            </div>
-            """
-        return h
+    for key in form.keys():
+        m = pattern.match(key)
+        if m:
+            col_key = m.group(1)
+            row_id = m.group(2)
+            s1 = form.get(f"{col_key}_set1_{row_id}", [""])[0].strip()
+            s3 = form.get(f"{col_key}_set3_{row_id}", [""])[0].strip()
+            s2 = form.get(f"{col_key}_set2_{row_id}", [""])[0].strip()
+            box_str = form.get(f"{col_key}_box_{row_id}", [""])[0].strip()
+            unc_note = form.get(f"{col_key}_note_{row_id}", [""])[0].strip()
+            
+            box_2d = []
+            if box_str:
+                try:
+                    box_2d = json.loads(box_str)
+                except Exception:
+                    box_2d = []
+                    
+            if s1 or s2:
+                items_by_col[col_key].append((row_id, {
+                    "set1": s1,
+                    "set3": s3,
+                    "set2": s2,
+                    "raw_text": f"{s1} = {s3 + ' ' if s3 else ''}{s2}".strip(),
+                    "box_2d": box_2d,
+                    "uncertain_note": unc_note
+                }))
+                
+    for col_key in ["top", "bottom", "top_bottom"]:
+        def sort_key(pair):
+            try:
+                return (0, int(pair[0]))
+            except ValueError:
+                return (1, str(pair[0]))
+        items_by_col[col_key].sort(key=sort_key)
+        new_columns[col_key] = [item[1] for item in items_by_col[col_key]]
+        
+    return new_columns
 
-    top_html = render_inputs(cols.get("top", []), "หมวด [ บน ]", "top")
-    bot_html = render_inputs(cols.get("bottom", []), "หมวด [ ล่าง ]", "bottom")
-    topbot_html = render_inputs(cols.get("top_bottom", []), "หมวด [ บนล่าง ]", "top_bottom")
-
-    html = f"""<!DOCTYPE html>
+def render_edit_success_page(sheet_id: str, is_confirmed: bool = False) -> str:
+    dest_name = "หน้าหลัก Dashboard" if is_confirmed else "แชท LINE"
+    redirect_url = "/?tab=live" if is_confirmed else "https://line.me"
+    
+    return f"""<!DOCTYPE html>
 <html lang="th">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>แก้ไขตัวเลข - ใบที่ {sheet_id}</title>
+    <title>บันทึกข้อมูลเรียบร้อย</title>
+    <script src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
     <style>
-        * {{ box-sizing: border-box; font-family: -apple-system, BlinkMacSystemFont, "Prompt", "Segoe UI", Roboto, sans-serif; }}
-        body {{ background: #f1f5f9; padding: 12px; margin: 0; color: #1e293b; }}
-        .header {{ background: white; padding: 14px; border-radius: 12px; margin-bottom: 14px; border: 1px solid #e2e8f0; }}
-        .title {{ font-size: 18px; font-weight: 700; color: #0f172a; margin: 0; }}
-        .sub {{ font-size: 13px; color: #64748b; margin-top: 4px; }}
-        .section-title {{ font-weight: 700; font-size: 15px; margin: 16px 0 8px 0; color: #2563eb; }}
-        .row-box {{ background: white; padding: 10px; border-radius: 10px; margin-bottom: 8px; display: flex; align-items: center; gap: 6px; border: 1px solid #e2e8f0; }}
-        .row-idx {{ width: 30px; font-size: 13px; color: #94a3b8; font-weight: 600; }}
-        input {{ padding: 10px 8px; border: 1px solid #cbd5e1; border-radius: 8px; font-size: 16px; font-weight: 700; text-align: center; outline: none; }}
-        input:focus {{ border-color: #2563eb; background: #eff6ff; }}
-        .inp-set1 {{ width: 75px; }}
-        .inp-set3 {{ width: 65px; color: #d97706; }}
-        .inp-set2 {{ flex: 1; }}
-        .btn-save {{ width: 100%; background: #059669; color: white; padding: 15px; border-radius: 12px; font-size: 17px; font-weight: 700; border: none; margin-top: 20px; cursor: pointer; }}
-        .btn-cancel {{ width: 100%; background: #94a3b8; color: white; padding: 12px; border-radius: 12px; font-size: 15px; font-weight: 600; border: none; margin-top: 10px; cursor: pointer; text-align: center; text-decoration: none; display: block; }}
+        @import url('https://fonts.googleapis.com/css2?family=Prompt:wght@400;500;600;700&display=swap');
+        * {{ box-sizing: border-box; font-family: 'Prompt', -apple-system, BlinkMacSystemFont, sans-serif; }}
+        body {{
+            background: #ECE7DF;
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            color: #2A2421;
+        }}
+        .card {{
+            background: #FFFFFF;
+            border: 1px solid #DDD5C7;
+            border-radius: 28px;
+            padding: 32px 24px;
+            max-width: 380px;
+            width: 100%;
+            text-align: center;
+            box-shadow: 0 20px 40px -15px rgba(80, 70, 60, 0.15);
+        }}
+        .icon-circle {{
+            width: 64px;
+            height: 64px;
+            border-radius: 50%;
+            background: #E8F3EB;
+            color: #2D6A4F;
+            border: 2px solid #CFE4D4;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 32px;
+            margin: 0 auto 16px auto;
+        }}
+        h2 {{
+            font-size: 20px;
+            font-weight: 700;
+            color: #2A2421;
+            margin: 0 0 8px 0;
+        }}
+        p {{
+            font-size: 13px;
+            color: #7D756D;
+            line-height: 1.6;
+            margin: 0 0 20px 0;
+        }}
+        .countdown {{
+            display: inline-block;
+            background: #F9F6F0;
+            border: 1px solid #EBE4D8;
+            padding: 6px 14px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 600;
+            color: #3A7D58;
+            margin-bottom: 24px;
+        }}
+        .btn {{
+            display: block;
+            width: 100%;
+            padding: 13px;
+            border-radius: 16px;
+            font-size: 14px;
+            font-weight: 700;
+            text-decoration: none;
+            border: none;
+            cursor: pointer;
+            transition: all 0.2s;
+            margin-bottom: 10px;
+        }}
+        .btn-primary {{
+            background: #3A7D58;
+            color: #FFFFFF;
+        }}
+        .btn-secondary {{
+            background: #F4EFE6;
+            color: #4A423B;
+            border: 1px solid #DDD5C7;
+        }}
     </style>
 </head>
 <body>
-    <div class="header">
-        <h1 class="title">✏️ แตะแก้ไขตัวเลข [ใบที่: {sheet_id}]</h1>
-        <div class="sub">ผู้ส่ง: {emp_name} | เอานิ้วจิ้มในช่องแล้วพิมพ์แก้ตัวเลขได้ทันที</div>
+    <div class="card">
+        <div class="icon-circle">✓</div>
+        <h2>บันทึกข้อมูลเรียบร้อยแล้ว!</h2>
+        <p>ใบที่ <b style="color: #2A2421;">{html_lib.escape(sheet_id)}</b> ได้รับการบันทึกข้อมูลและยืนยันเข้าระบบเรียบร้อยแล้ว</p>
+        
+        <div class="countdown" id="countdownBox">
+            ⏱️ กำลังปิดหน้าต่างอัตโนมัติใน <span id="sec">2</span> วิ...
+        </div>
+
+        <button onclick="doClose()" class="btn btn-primary">
+            ✕ ปิดหน้าต่างทันที
+        </button>
+        <a href="{redirect_url}" class="btn btn-secondary">
+            ↩️ กลับสู่ {dest_name}
+        </a>
     </div>
 
-    <form method="POST" action="/edit/{scan_id}">
-        {top_html}
-        {bot_html}
-        {topbot_html}
-        <button type="submit" class="btn-save">✅ บันทึกการแก้ไขและยืนยันข้อมูล</button>
-        <a href="https://line.me" class="btn-cancel">กลับไปที่ LINE</a>
-    </form>
+    <script>
+        function doClose() {{
+            if (window.liff && typeof liff.closeWindow === 'function') {{
+                try {{ liff.closeWindow(); }} catch(e) {{}}
+            }}
+            try {{ window.close(); }} catch(e) {{}}
+            window.location.href = "{redirect_url}";
+        }}
+
+        var timeLeft = 2;
+        var timer = setInterval(function() {{
+            timeLeft--;
+            var secEl = document.getElementById('sec');
+            if (secEl) secEl.innerText = timeLeft;
+            if (timeLeft <= 0) {{
+                clearInterval(timer);
+                doClose();
+            }}
+        }}, 800);
+    </script>
 </body>
-</html>
-"""
-    return html
+</html>"""
+
+def render_split_editor(data_dict: dict, form_action: str, is_confirmed: bool = False, cancel_url: str = "") -> str:
+    sheet_id = data_dict.get("sheet_id", "TEST-01")
+    emp_name = data_dict.get("emp_name", "") or data_dict.get("employee_name", "")
+    worker_code = data_dict.get("worker_code", "")
+    period_name = data_dict.get("period_name", "") or "งวดปัจจุบัน"
+    raw_img = data_dict.get("image_path", "")
+    
+    img_url = f"/{raw_img}" if raw_img.startswith("uploads/") else (raw_img if raw_img.startswith("/uploads/") else "")
+    if not cancel_url:
+        cancel_url = "/" if is_confirmed else "https://line.me"
+        
+    columns = data_dict.get("columns", {})
+    
+    total_items = 0
+    initial_total = 0.0
+    for col_key, items in columns.items():
+        for itm in items:
+            s1 = itm.get("set1", "")
+            s2 = itm.get("set2", "")
+            if s1 or s2:
+                total_items += 1
+                if "x" in s2.lower():
+                    for p in s2.lower().split("x"):
+                        cleaned = re.sub(r"[^\d.]", "", p)
+                        if cleaned:
+                            try: initial_total += float(cleaned)
+                            except: pass
+                else:
+                    cleaned = re.sub(r"[^\d.]", "", s2)
+                    if cleaned:
+                        try: initial_total += float(cleaned)
+                        except: pass
+                        
+    uncertain_items = []
+    first_item_info = None
+    
+    for col_key in ["top", "bottom", "top_bottom"]:
+        items = columns.get(col_key, [])
+        for idx, itm in enumerate(items):
+            uid = f"{col_key}_{idx}"
+            box = itm.get("box_2d") or []
+            s1 = itm.get("set1", "")
+            s2 = itm.get("set2", "")
+            s3 = itm.get("set3", "")
+            note = itm.get("uncertain_note", "")
+            is_val = itm.get("is_valid", True)
+            label = f"{s1} = {s3 + ' ' if s3 else ''}{s2}".strip()
+            
+            if not first_item_info and (s1 or s2):
+                first_item_info = (uid, box, label)
+                
+            if note or not is_val:
+                uncertain_items.append({
+                    "uid": uid,
+                    "col_key": col_key,
+                    "col_label": "บน" if col_key == "top" else ("ล่าง" if col_key == "bottom" else "บนล่าง"),
+                    "idx": idx,
+                    "set1": s1,
+                    "set2": s2,
+                    "set3": s3,
+                    "label": label,
+                    "box": box,
+                    "note": note or "ตัวเลขไม่ชัดเจน โปรดตรวจสอบ"
+                })
+
+    urgent_html = ""
+    if uncertain_items:
+        cards_html = ""
+        for u in uncertain_items:
+            box_json_str = json.dumps(u["box"])
+            chips_html = ""
+            found_nums = re.findall(r"\b\d+\b", u["note"])
+            for fn in found_nums[:2]:
+                chips_html += f"""<button type="button" onclick="applyQuickFix('{u['uid']}', '{fn}')" class="text-[11px] font-bold text-[#8F6E14] bg-[#FEF9EA] hover:bg-[#FDF0D5] border border-[#F6ECCB] px-2.5 py-0.5 rounded-lg cursor-pointer transition-all">แก้เป็น {fn}</button>"""
+                
+            cards_html += f"""
+            <div class="bg-[#FFFFFF] border border-[#FCD34D] rounded-xl p-2.5 flex items-center justify-between gap-2 shadow-xs">
+                <div class="flex items-center gap-2">
+                    <span class="text-[10px] font-bold text-[#B45309] bg-[#FEF3C7] px-2 py-0.5 rounded-md border border-[#FDE68A]">[{u['col_label']}]</span>
+                    <div>
+                        <div class="text-xs font-bold text-[#2A2421] font-mono">{html_lib.escape(u['label'])}</div>
+                        <div class="text-[11px] text-[#B45309] font-medium">{html_lib.escape(u['note'])}</div>
+                    </div>
+                </div>
+                <div class="flex items-center gap-1.5 shrink-0">
+                    {chips_html}
+                    <button type="button" onclick="triggerRowFocus('{u['uid']}', {box_json_str}, '{html_lib.escape(u['label'])}'); document.getElementById('inputNum-{u['uid']}').focus();" class="text-xs font-semibold bg-[#3A7D58] hover:bg-[#326C4C] text-[#FFFFFF] px-2.5 py-1 rounded-xl shadow-xs cursor-pointer transition-all">
+                        🔍 ส่องจุดนี้
+                    </button>
+                </div>
+            </div>
+            """
+            
+        urgent_html = f"""
+        <div class="bg-[#FEF3C7]/90 border border-[#FCD34D] rounded-2xl p-3 shadow-xs space-y-2 mb-3">
+            <div class="flex items-center justify-between text-xs">
+                <span class="font-bold text-[#B45309] flex items-center gap-1.5">
+                    <span>⚠️</span> รายการที่ระบบไม่มั่นใจ ({len(uncertain_items)} รายการ)
+                </span>
+                <span class="text-[10px] text-[#92400E] font-medium">ส่องเทียบกับภาพด้านบน</span>
+            </div>
+            <div class="space-y-1.5">
+                {cards_html}
+            </div>
+        </div>
+        """
+
+    cat_sections_html = ""
+    cat_configs = [
+        ("top", "หมวด [บน]", "#2D6A4F", "#E8F3EB", "#CFE4D4", "#3A7D58"),
+        ("bottom", "หมวด [ล่าง]", "#6B5384", "#F3EFF8", "#E3D9ED", "#6B5384"),
+        ("top_bottom", "หมวด [บนล่าง]", "#B85D19", "#FDF2EA", "#F7DFD2", "#B85D19")
+    ]
+    
+    global_row_counter = 0
+    for col_key, col_title, text_col, bg_col, border_col, accent_col in cat_configs:
+        items = columns.get(col_key, [])
+        rows_inner_html = ""
+        
+        for idx, itm in enumerate(items):
+            global_row_counter += 1
+            uid = f"{col_key}_{idx}"
+            s1 = itm.get("set1", "")
+            s2 = itm.get("set2", "")
+            s3 = itm.get("set3", "")
+            box = itm.get("box_2d") or []
+            note = itm.get("uncertain_note", "")
+            box_json = json.dumps(box)
+            label = f"{s1} = {s3 + ' ' if s3 else ''}{s2}".strip()
+            
+            s3_input = f"""<input type="text" name="{col_key}_set3_{uid}" id="inputMod-{uid}" value="{html_lib.escape(s3)}" placeholder="ก3" class="w-12 bg-[#FEF9EA] border border-[#F6ECCB] text-[#8F6E14] font-bold text-center text-xs rounded-xl py-1.5 outline-none">"""
+            
+            rows_inner_html += f"""
+            <div id="rowCard-{uid}" class="row-card bg-[#FFFFFF] border border-[#EDE7DD] hover:border-[#CFE4D4] rounded-2xl p-2.5 flex items-center justify-between shadow-xs transition-all">
+                <span class="w-6 text-xs text-[#8A8279] font-mono text-center">#{global_row_counter}</span>
+                <div class="flex items-center gap-2 flex-1 px-1">
+                    <input type="text" name="{col_key}_set1_{uid}" id="inputNum-{uid}" value="{html_lib.escape(s1)}" placeholder="เลข" inputmode="numeric" onfocus="triggerRowFocus('{uid}', {box_json}, '{html_lib.escape(label)}')" oninput="onDataChanged()" class="w-20 bg-[#F9F6F0] focus:bg-[#FFFFFF] border border-[#DDD5C7] focus:border-[{accent_col}] text-[#2A2421] font-mono font-bold text-center text-base rounded-xl py-1.5 outline-none">
+                    <span class="text-[#A8A095] font-bold">=</span>
+                    {s3_input}
+                    <input type="text" name="{col_key}_set2_{uid}" id="inputPrice-{uid}" value="{html_lib.escape(s2)}" placeholder="ยอดเงิน" inputmode="numeric" onfocus="triggerRowFocus('{uid}', {box_json}, '{html_lib.escape(label)}')" oninput="onDataChanged()" class="flex-1 bg-[#F9F6F0] focus:bg-[#FFFFFF] border border-[#DDD5C7] focus:border-[{accent_col}] text-[#2D6A4F] font-mono font-bold text-center text-base rounded-xl py-1.5 outline-none">
+                </div>
+                <input type="hidden" name="{col_key}_box_{uid}" value="{html_lib.escape(json.dumps(box))}">
+                <input type="hidden" name="{col_key}_note_{uid}" value="{html_lib.escape(note)}">
+                <button type="button" onclick="deleteRow('{uid}')" title="ลบรายการนี้" class="w-8 h-8 rounded-lg text-slate-400 hover:text-rose-500 hover:bg-rose-50 flex items-center justify-center text-sm cursor-pointer transition-colors">
+                    ✕
+                </button>
+            </div>
+            """
+            
+        cat_sections_html += f"""
+        <div class="space-y-2 pt-2">
+            <div class="flex items-center justify-between">
+                <div class="text-[11px] font-bold px-2.5 py-1 rounded-lg inline-block border" style="color: {text_col}; background: {bg_col}; border-color: {border_col};">
+                    {col_title} ({len(items)} รายการ)
+                </div>
+            </div>
+            <div id="rowsContainer-{col_key}" class="space-y-2">
+                {rows_inner_html}
+            </div>
+            <button type="button" onclick="addNewRow('{col_key}', '{col_title}')" class="w-full py-2 rounded-2xl bg-[#FFFFFF] hover:bg-[#F4EFE6] text-[#3A7D58] border border-dashed border-[#CFE4D4] font-semibold text-xs flex items-center justify-center gap-1.5 shadow-xs transition-all cursor-pointer">
+                <span>➕ เพิ่มรายการใน{col_title}</span>
+            </button>
+        </div>
+        """
+
+    if img_url:
+        image_element_html = f"""
+        <div id="imageContainer" style="position: absolute; transform-origin: 0 0; transition: transform 0.15s ease-out;">
+            <img id="realPaperImg" src="{img_url}" class="pointer-events-none select-none" style="display: block; max-width: none;" onload="initImageDimensions()">
+            <div id="spotlightRing" class="spotlight-box" style="position: absolute; display: none; pointer-events: none;"></div>
+        </div>
+        """
+    else:
+        image_element_html = f"""
+        <div class="text-center p-6 text-[#7D756D]">
+            <div class="text-3xl mb-1">📷</div>
+            <div class="text-xs font-bold text-[#2A2421]">ไม่มีไฟล์ภาพถ่ายในระบบ</div>
+            <div class="text-[11px] text-[#8A8279] mt-0.5">สามารถตรวจสอบและแก้ไขตัวเลขในแบบฟอร์มด้านล่างได้ทันที</div>
+        </div>
+        """
+
+    if uncertain_items:
+        u = uncertain_items[0]
+        init_script = f"triggerRowFocus('{u['uid']}', {json.dumps(u['box'])}, '{html_lib.escape(u['label'])}');"
+    elif first_item_info:
+        init_script = f"triggerRowFocus('{first_item_info[0]}', {json.dumps(first_item_info[1])}, '{html_lib.escape(first_item_info[2])}');"
+    else:
+        init_script = "resetPaperZoom();"
+
+    status_badge_html = f"""<span class="text-[10px] font-semibold text-[#2D6A4F] bg-[#E8F3EB] px-2 py-0.5 rounded-full border border-[#CFE4D4]">บันทึกแล้ว</span>""" if is_confirmed else f"""<span class="text-[10px] font-semibold text-[#B45309] bg-[#FEF3C7] px-2 py-0.5 rounded-full border border-[#FCD34D]">รอการยืนยัน</span>"""
+
+    return f"""<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>ตรวจสอบ/แก้ไข - ใบที่ {html_lib.escape(sheet_id)}</title>
+    <script src="https://www.gstatic.com/antigravity/web/dev/tailwindcss.min.js"></script>
+    <script src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Prompt:wght@300;400;500;600;700&family=JetBrains+Mono:wght@500;600;700;800&display=swap');
+        * {{ font-family: 'Prompt', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; -webkit-tap-highlight-color: transparent; }}
+        .font-mono {{ font-family: 'JetBrains Mono', monospace; font-feature-settings: 'tnum' on, 'lnum' on; }}
+        ::-webkit-scrollbar {{ width: 4px; height: 4px; }}
+        ::-webkit-scrollbar-track {{ background: transparent; }}
+        ::-webkit-scrollbar-thumb {{ background: #D8D0C3; border-radius: 4px; }}
+        
+        .phone-frame {{
+            max-width: 440px;
+            margin: 0 auto;
+            border-radius: 36px;
+            box-shadow: 0 25px 60px -15px rgba(80, 70, 60, 0.22), 0 0 0 1px #DFD7CB;
+            overflow: hidden;
+            min-height: 860px;
+            height: 94vh;
+            position: relative;
+            background: #F9F6F0;
+            display: flex;
+            flex-direction: column;
+        }}
+        
+        .spotlight-box {{
+            border: 2.5px solid #22c55e;
+            background: rgba(34, 197, 94, 0.16);
+            border-radius: 6px;
+            box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.25);
+            transition: all 0.25s cubic-bezier(0.2, 0.8, 0.2, 1);
+        }}
+        
+        .row-focused {{
+            border-color: #3A7D58 !important;
+            background-color: #F2FAF5 !important;
+            box-shadow: 0 0 0 2px rgba(58, 125, 88, 0.25) !important;
+        }}
+    </style>
+</head>
+<body class="bg-[#ECE7DF] text-[#2A2421] antialiased min-h-screen p-0 md:p-4 flex flex-col items-center">
+
+    <div class="hidden md:flex w-full max-w-xl mb-4 items-center justify-between bg-[#FFFFFF] border border-[#DDD5C7] px-4 py-2 rounded-2xl shadow-xs">
+        <div class="flex items-center gap-2">
+            <span class="w-2.5 h-2.5 rounded-full bg-[#3A7D58]"></span>
+            <span class="text-xs font-semibold text-[#2A2421]">ระบบตรวจสอบ/แก้ไขตัวเลข (ภาพถ่ายจริง + ไฮไลท์แม่นยำ)</span>
+        </div>
+        <div class="flex items-center gap-2">
+            <button type="button" id="btnToggleFrame" onclick="togglePhoneFrame()" class="text-xs font-medium px-3 py-1.5 rounded-xl bg-[#F4EFE6] hover:bg-[#EAE4D8] text-[#4A423B] border border-[#DDD5C7] transition-all cursor-pointer">
+                <span id="frameText">สลับดูแบบเต็มจอ (Desktop)</span>
+            </button>
+        </div>
+    </div>
+
+    <!-- Container Frame -->
+    <div id="appContainer" class="phone-frame w-full text-[#2A2421]">
+        
+        <!-- Header -->
+        <header class="bg-[#FFFFFF] border-b border-[#EBE4D8] px-4 py-3 flex items-center justify-between shrink-0 shadow-xs z-20">
+            <div class="flex items-center gap-2.5">
+                <a href="{cancel_url}" onclick="tryClose()" class="w-8 h-8 rounded-xl bg-[#F4EFE6] flex items-center justify-center text-[#5C544C] hover:text-[#2A2421] transition-colors text-sm text-decoration-none">
+                    ✕
+                </a>
+                <div>
+                    <div class="text-[11px] font-semibold text-[#6D655E]">ตรวจสอบและแก้ไขโพย</div>
+                    <div class="text-sm font-bold text-[#2A2421] flex items-center gap-1.5">
+                        <span>ใบที่: {html_lib.escape(sheet_id)}</span>
+                        {status_badge_html}
+                    </div>
+                </div>
+            </div>
+            <div class="text-right">
+                <span class="text-[11px] font-medium text-[#7D756D]">{html_lib.escape(period_name)}</span>
+                <div class="text-xs font-bold text-[#3A7D58] font-mono">{html_lib.escape(emp_name or worker_code or "ผู้ส่ง")}</div>
+            </div>
+        </header>
+
+        <!-- 1. STICKY REAL PAPER VIEWER (Top 260px) -->
+        <div class="bg-[#E5DFD5] border-b border-[#DDD5C7] shrink-0 relative overflow-hidden flex flex-col" style="height: 260px;">
+            <div class="absolute top-2.5 left-3 right-3 z-10 flex items-center justify-between pointer-events-none">
+                <div class="inline-flex items-center gap-1.5 bg-[#FFFFFF]/95 backdrop-blur-xs px-2.5 py-1 rounded-xl border border-[#DDD5C7] shadow-xs pointer-events-auto">
+                    <span class="w-2 h-2 rounded-full bg-[#22c55e] animate-pulse"></span>
+                    <span id="spotlightTargetText" class="text-[11px] font-semibold text-[#2A2421]">ส่องจุด: กำลังโหลด</span>
+                </div>
+                <div class="flex items-center gap-1 bg-[#FFFFFF]/95 backdrop-blur-xs p-1 rounded-xl border border-[#DDD5C7] shadow-xs pointer-events-auto">
+                    <button type="button" onclick="zoomPaper(0.3)" title="ซูมเข้า" class="w-7 h-7 rounded-lg bg-[#F9F6F0] hover:bg-[#EAE4D8] text-xs font-bold text-[#2A2421] flex items-center justify-center cursor-pointer">➕</button>
+                    <button type="button" onclick="zoomPaper(-0.3)" title="ซูมออก" class="w-7 h-7 rounded-lg bg-[#F9F6F0] hover:bg-[#EAE4D8] text-xs font-bold text-[#2A2421] flex items-center justify-center cursor-pointer">➖</button>
+                    <button type="button" onclick="resetPaperZoom()" title="ดูทั้งใบ" class="w-7 h-7 rounded-lg bg-[#F9F6F0] hover:bg-[#EAE4D8] text-xs text-[#2A2421] flex items-center justify-center cursor-pointer">🔄</button>
+                </div>
+            </div>
+
+            <!-- Viewport -->
+            <div id="paperViewport" class="w-full h-full relative overflow-hidden flex items-center justify-center cursor-grab select-none">
+                {image_element_html}
+            </div>
+        </div>
+
+        <!-- 2. SCROLLABLE EDITING FORM -->
+        <form id="editForm" method="POST" action="{form_action}" class="flex-1 overflow-y-auto pb-24 p-3 space-y-3">
+            {urgent_html}
+            {cat_sections_html}
+            
+            <!-- Bottom Action Bar (Inside Form for easy submission) -->
+            <footer class="fixed md:absolute bottom-0 left-0 right-0 bg-[#FFFFFF] border-t border-[#EBE4D8] px-4 py-3 shadow-lg z-30 flex flex-col gap-2">
+                <div class="flex items-center justify-between text-xs px-0.5">
+                    <div class="text-[#7D756D]">
+                        สรุปรวม: <span id="footerCountText" class="font-bold text-[#2A2421] font-mono">{total_items}</span> ชุด
+                    </div>
+                    <div class="text-[#7D756D]">
+                        ยอดรวมสุทธิ: <span id="footerTotalText" class="font-bold text-[#2D6A4F] font-mono text-sm">{initial_total:,.0f}</span> <span class="font-normal text-[#2D6A4F]">฿</span>
+                    </div>
+                </div>
+                <div class="flex items-center gap-2">
+                    <a href="{cancel_url}" onclick="tryClose()" class="w-24 py-2.5 rounded-2xl bg-[#FDF0F1] hover:bg-[#FCE3E5] text-[#A84357] border border-[#F7D5D9] text-xs font-semibold transition-all cursor-pointer text-center text-decoration-none">
+                        ยกเลิก
+                    </a>
+                    <button type="submit" class="flex-1 py-2.5 rounded-2xl bg-[#3A7D58] hover:bg-[#326C4C] text-[#FFFFFF] text-xs font-bold shadow-md transition-all active:scale-[0.98] flex items-center justify-center gap-1.5 cursor-pointer">
+                        <span>✅ บันทึกและยืนยันข้อมูล</span>
+                    </button>
+                </div>
+            </footer>
+        </form>
+
+    </div>
+
+    <!-- Toast -->
+    <div id="toast" class="fixed top-4 z-50 bg-[#2A2421] text-[#F9F6F0] text-xs px-4 py-2 rounded-2xl shadow-lg opacity-0 transform -translate-y-3 transition-all pointer-events-none">
+        ข้อความแจ้งเตือน
+    </div>
+
+    <script>
+        var currentZoom = 2.4;
+        var currentPanX = 0;
+        var currentPanY = 0;
+        var isPanning = false;
+        var panStartX = 0;
+        var panStartY = 0;
+
+        function togglePhoneFrame() {{
+            var app = document.getElementById('appContainer');
+            var txt = document.getElementById('frameText');
+            if (app.classList.contains('phone-frame')) {{
+                app.classList.remove('phone-frame');
+                app.classList.add('max-w-4xl', 'rounded-3xl', 'shadow-sm', 'min-h-[850px]', 'h-auto');
+                txt.innerText = 'สลับดูแบบจอมือถือ (Mobile)';
+            }} else {{
+                app.classList.add('phone-frame');
+                app.classList.remove('max-w-4xl', 'rounded-3xl', 'shadow-sm', 'min-h-[850px]', 'h-auto');
+                txt.innerText = 'สลับดูแบบเต็มจอ (Desktop)';
+            }}
+        }}
+
+        function tryClose() {{
+            if (window.liff && typeof liff.closeWindow === 'function') {{
+                try {{ liff.closeWindow(); }} catch(e) {{}}
+            }}
+            try {{ window.close(); }} catch(e) {{}}
+        }}
+
+        function applyPaperTransform() {{
+            var container = document.getElementById('imageContainer');
+            if (container) {{
+                container.style.transform = 'translate(' + currentPanX + 'px, ' + currentPanY + 'px) scale(' + currentZoom + ')';
+            }}
+        }}
+
+        function zoomPaper(delta) {{
+            currentZoom = Math.max(0.6, Math.min(5.0, currentZoom + delta));
+            applyPaperTransform();
+        }}
+
+        function initImageDimensions() {{
+            var img = document.getElementById('realPaperImg');
+            var cont = document.getElementById('imageContainer');
+            if (!img || !cont) return;
+            var nw = img.naturalWidth || 500;
+            var nh = img.naturalHeight || 500;
+            var baseWidth = 480;
+            var baseHeight = (nh / nw) * baseWidth;
+            cont.style.width = baseWidth + 'px';
+            cont.style.height = baseHeight + 'px';
+            resetPaperZoom();
+        }}
+
+        function resetPaperZoom() {{
+            var vp = document.getElementById('paperViewport');
+            var cont = document.getElementById('imageContainer');
+            if (!vp || !cont) return;
+            var vpW = vp.clientWidth || 400;
+            var vpH = vp.clientHeight || 260;
+            var contW = cont.offsetWidth || 480;
+            var contH = cont.offsetHeight || 480;
+
+            currentZoom = Math.min(vpW / contW, vpH / contH) * 0.95;
+            currentPanX = (vpW - (contW * currentZoom)) / 2;
+            currentPanY = (vpH - (contH * currentZoom)) / 2;
+            applyPaperTransform();
+            
+            var ring = document.getElementById('spotlightRing');
+            if (ring) ring.style.display = 'none';
+            var txt = document.getElementById('spotlightTargetText');
+            if (txt) txt.innerText = 'ภาพรวมทั้งใบ';
+        }}
+
+        function triggerRowFocus(rowId, boxCoords, label) {{
+            var vp = document.getElementById('paperViewport');
+            var cont = document.getElementById('imageContainer');
+            if (!vp || !cont) return;
+            var vpW = vp.clientWidth || 400;
+            var vpH = vp.clientHeight || 260;
+            var contW = cont.offsetWidth || 480;
+            var contH = cont.offsetHeight || 480;
+
+            var ring = document.getElementById('spotlightRing');
+            if (boxCoords && boxCoords.length === 4 && ring) {{
+                var ymin = boxCoords[0];
+                var xmin = boxCoords[1];
+                var ymax = boxCoords[2];
+                var xmax = boxCoords[3];
+
+                ring.style.top = (ymin / 10.0) + '%';
+                ring.style.left = (xmin / 10.0) + '%';
+                ring.style.height = ((ymax - ymin) / 10.0) + '%';
+                ring.style.width = ((xmax - xmin) / 10.0) + '%';
+                ring.style.display = 'block';
+
+                currentZoom = 2.4;
+                var targetX = ((xmin + xmax) / 2000.0) * contW;
+                var targetY = ((ymin + ymax) / 2000.0) * contH;
+
+                currentPanX = (vpW / 2) - (targetX * currentZoom);
+                currentPanY = (vpH / 2) - (targetY * currentZoom);
+                applyPaperTransform();
+            }}
+
+            if (label) {{
+                var txt = document.getElementById('spotlightTargetText');
+                if (txt) txt.innerText = 'ส่องจุด: ' + label;
+            }}
+
+            var cards = document.querySelectorAll('.row-card');
+            cards.forEach(function(c) {{ c.classList.remove('row-focused'); }});
+            var activeCard = document.getElementById('rowCard-' + rowId);
+            if (activeCard) activeCard.classList.add('row-focused');
+        }}
+
+        function applyQuickFix(rowId, val) {{
+            var inp = document.getElementById('inputNum-' + rowId);
+            if (inp) {{
+                inp.value = val;
+                onDataChanged();
+                showToast('แก้ไขตัวเลขเป็น ' + val + ' เรียบร้อย');
+            }}
+        }}
+
+        function deleteRow(rowId) {{
+            var card = document.getElementById('rowCard-' + rowId);
+            if (card) {{
+                card.style.opacity = '0';
+                card.style.transform = 'scale(0.95)';
+                setTimeout(function() {{
+                    card.remove();
+                    onDataChanged();
+                    showToast('ลบรายการเรียบร้อย');
+                }}, 150);
+            }}
+        }}
+
+        function addNewRow(colKey, colName) {{
+            var newId = 'new_' + Date.now();
+            var container = document.getElementById('rowsContainer-' + colKey);
+            if (!container) return;
+            
+            var newCard = document.createElement('div');
+            newCard.id = 'rowCard-' + newId;
+            newCard.className = 'row-card bg-[#FFFFFF] border-2 border-dashed border-[#3A7D58] rounded-2xl p-2.5 flex items-center justify-between shadow-xs transition-all animate-fade-in';
+            
+            newCard.innerHTML = 
+                '<span class="w-6 text-xs text-[#8A8279] font-mono text-center">+</span>' +
+                '<div class="flex items-center gap-2 flex-1 px-1">' +
+                    '<input type="text" name="' + colKey + '_set1_' + newId + '" id="inputNum-' + newId + '" placeholder="เลข" inputmode="numeric" oninput="onDataChanged()" class="w-20 bg-[#F9F6F0] focus:bg-[#FFFFFF] border border-[#DDD5C7] focus:border-[#3A7D58] text-[#2A2421] font-mono font-bold text-center text-base rounded-xl py-1.5 outline-none">' +
+                    '<span class="text-[#A8A095] font-bold">=</span>' +
+                    '<input type="text" name="' + colKey + '_set3_' + newId + '" id="inputMod-' + newId + '" placeholder="ก3" class="w-12 bg-[#FEF9EA] border border-[#F6ECCB] text-[#8F6E14] font-bold text-center text-xs rounded-xl py-1.5 outline-none">' +
+                    '<input type="text" name="' + colKey + '_set2_' + newId + '" id="inputPrice-' + newId + '" placeholder="ยอดเงิน" inputmode="numeric" oninput="onDataChanged()" class="flex-1 bg-[#F9F6F0] focus:bg-[#FFFFFF] border border-[#DDD5C7] focus:border-[#3A7D58] text-[#2D6A4F] font-mono font-bold text-center text-base rounded-xl py-1.5 outline-none">' +
+                '</div>' +
+                '<input type="hidden" name="' + colKey + '_box_' + newId + '" value="[]">' +
+                '<input type="hidden" name="' + colKey + '_note_' + newId + '" value="">' +
+                '<button type="button" onclick="deleteRow(\'' + newId + '\')" class="w-8 h-8 rounded-lg text-slate-400 hover:text-rose-500 hover:bg-rose-50 flex items-center justify-center text-sm cursor-pointer transition-colors">✕</button>';
+                
+            container.appendChild(newCard);
+            onDataChanged();
+            var inp = document.getElementById('inputNum-' + newId);
+            if (inp) inp.focus();
+            showToast('เพิ่มรายการใหม่ใน ' + colName);
+        }}
+
+        function onDataChanged() {{
+            var total = 0;
+            var count = 0;
+            var inputs = document.querySelectorAll('input[id^="inputPrice-"]');
+            inputs.forEach(function(inp) {{
+                var val = (inp.value || '').trim();
+                var numInp = document.getElementById(inp.id.replace('inputPrice-', 'inputNum-'));
+                var numVal = numInp ? (numInp.value || '').trim() : '';
+                
+                if (numVal || val) {{
+                    count++;
+                }}
+                if (!val) return;
+                if (val.indexOf('x') !== -1 || val.indexOf('X') !== -1) {{
+                    var parts = val.toLowerCase().split('x');
+                    parts.forEach(function(p) {{
+                        var num = parseFloat(p.replace(/[^0-9.]/g, '')) || 0;
+                        total += num;
+                    }});
+                }} else {{
+                    var num = parseFloat(val.replace(/[^0-9.]/g, '')) || 0;
+                    total += num;
+                }}
+            }});
+            var cntEl = document.getElementById('footerCountText');
+            if (cntEl) cntEl.innerText = count;
+            var totEl = document.getElementById('footerTotalText');
+            if (totEl) totEl.innerText = total.toLocaleString();
+        }}
+
+        function showToast(msg) {{
+            var toast = document.getElementById('toast');
+            toast.innerText = msg;
+            toast.classList.remove('opacity-0', '-translate-y-3');
+            toast.classList.add('opacity-100', 'translate-y-0');
+            setTimeout(function() {{
+                toast.classList.remove('opacity-100', 'translate-y-0');
+                toast.classList.add('opacity-0', '-translate-y-3');
+            }}, 2000);
+        }}
+
+        window.addEventListener('DOMContentLoaded', function() {{
+            setTimeout(function() {{
+                {init_script}
+            }}, 250);
+
+            var vp = document.getElementById('paperViewport');
+            if (!vp) return;
+
+            vp.addEventListener('mousedown', function(e) {{
+                isPanning = true;
+                panStartX = e.clientX - currentPanX;
+                panStartY = e.clientY - currentPanY;
+                vp.style.cursor = 'grabbing';
+            }});
+
+            window.addEventListener('mousemove', function(e) {{
+                if (!isPanning) return;
+                currentPanX = e.clientX - panStartX;
+                currentPanY = e.clientY - panStartY;
+                applyPaperTransform();
+            }});
+
+            window.addEventListener('mouseup', function() {{
+                isPanning = false;
+                if (vp) vp.style.cursor = 'grab';
+            }});
+
+            vp.addEventListener('touchstart', function(e) {{
+                if (e.touches.length === 1) {{
+                    isPanning = true;
+                    panStartX = e.touches[0].clientX - currentPanX;
+                    panStartY = e.touches[0].clientY - currentPanY;
+                }}
+            }}, {{ passive: true }});
+
+            window.addEventListener('touchmove', function(e) {{
+                if (!isPanning || e.touches.length !== 1) return;
+                currentPanX = e.touches[0].clientX - panStartX;
+                currentPanY = e.touches[0].clientY - panStartY;
+                applyPaperTransform();
+            }}, {{ passive: true }});
+
+            window.addEventListener('touchend', function() {{
+                isPanning = false;
+            }});
+        }});
+    </script>
+</body>
+</html>"""
+
+def render_edit_page(scan_id: int) -> str:
+    scan = database.get_pending_scan(scan_id)
+    if not scan:
+        return f"""<!DOCTYPE html>
+<html lang="th"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>ไม่พบข้อมูล</title>
+<style>body{{font-family:sans-serif;background:#ECE7DF;padding:40px;text-align:center;color:#2A2421;}}
+.card{{background:white;padding:30px;border-radius:24px;max-width:400px;margin:auto;box-shadow:0 4px 12px rgba(0,0,0,0.08);}}
+a{{display:inline-block;margin-top:16px;padding:10px 20px;background:#3A7D58;color:white;text-decoration:none;border-radius:12px;font-weight:700;}}
+</style></head><body><div class="card">
+    <h2 style="color:#A84357;margin-top:0;">❌ ไม่พบรายการนี้</h2>
+    <p style="color:#7D756D;font-size:14px;">รายการสแกนนี้อาจถูกยกเลิกหรือไม่มีอยู่ในระบบ</p>
+    <a href="https://line.me">กลับไปที่ LINE</a>
+</div></body></html>"""
+
+    if scan["status"] != "PENDING":
+        sheet_id = scan.get("sheet_id", "")
+        edit_link_html = f'<div style="margin-top:12px;"><a href="/sheet/edit/{sheet_id}" style="background:#3A7D58;color:white;padding:10px 20px;border-radius:12px;text-decoration:none;font-weight:700;display:inline-block;">✏️ แก้ไขข้อมูลใบนี้ย้อนหลัง</a></div>' if sheet_id else ''
+        return f"""<!DOCTYPE html>
+<html lang="th"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>สถานะรายการ</title>
+<style>body{{font-family:sans-serif;background:#ECE7DF;padding:40px;text-align:center;color:#2A2421;}}
+.card{{background:white;padding:30px;border-radius:24px;max-width:400px;margin:auto;box-shadow:0 4px 12px rgba(0,0,0,0.08);}}
+a{{display:inline-block;margin-top:16px;padding:10px 20px;background:#64748b;color:white;text-decoration:none;border-radius:12px;font-weight:700;}}
+</style></head><body><div class="card">
+    <h2 style="color:#B45309;margin-top:0;">⚠️ รายการนี้ได้รับการยืนยันแล้ว</h2>
+    <p style="color:#7D756D;font-size:14px;">รายการนี้อยู่ในสถานะ '{scan['status']}' แล้ว</p>
+    {edit_link_html}
+    <div style="margin-top:8px;"><a href="https://line.me">กลับไปที่ LINE</a></div>
+</div></body></html>"""
+
+    val_data = json.loads(scan["val_json"]) if scan.get("val_json") else {}
+    cols = val_data.get("validated_columns", {})
+    
+    period = database.get_period_by_id(scan.get("period_id")) if scan.get("period_id") else None
+    period_name = period["name"] if period else "งวดปัจจุบัน"
+    
+    data_dict = {
+        "sheet_id": scan.get("sheet_id", ""),
+        "emp_name": scan.get("emp_name", ""),
+        "worker_code": scan.get("worker_code", ""),
+        "period_name": period_name,
+        "image_path": scan.get("image_path", ""),
+        "columns": cols
+    }
+    return render_split_editor(data_dict, form_action=f"/edit/{scan_id}", is_confirmed=False, cancel_url="https://line.me")
+
+def render_confirmed_sheet_edit_page(sheet_id_or_db_id: str) -> str:
+    data = database.get_sheet_for_edit(sheet_id_or_db_id)
+    if not data:
+        return f"""<!DOCTYPE html>
+<html lang="th"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>ไม่พบข้อมูล</title>
+<style>body{{font-family:sans-serif;background:#ECE7DF;padding:40px;text-align:center;color:#2A2421;}}
+.card{{background:white;padding:30px;border-radius:24px;max-width:400px;margin:auto;box-shadow:0 4px 12px rgba(0,0,0,0.08);}}
+a{{display:inline-block;margin-top:16px;padding:10px 20px;background:#3A7D58;color:white;text-decoration:none;border-radius:12px;font-weight:700;}}
+</style></head><body><div class="card">
+    <h2 style="color:#A84357;margin-top:0;">❌ ไม่พบใบนี้ในระบบ</h2>
+    <p style="color:#7D756D;font-size:14px;">ไม่พบข้อมูลของใบที่ <b>{html_lib.escape(str(sheet_id_or_db_id))}</b> หรืออาจยังไม่ได้บันทึกเข้าระบบ</p>
+    <a href="/">กลับสู่หน้าหลัก Dashboard</a>
+</div></body></html>"""
+
+    sheet = data["sheet"]
+    cols = data["columns"]
+    data_dict = {
+        "sheet_id": sheet["sheet_id"],
+        "employee_name": sheet.get("employee_name", ""),
+        "worker_code": sheet.get("worker_code", ""),
+        "period_name": sheet.get("period_name") or "งวดปัจจุบัน",
+        "image_path": sheet.get("image_path", ""),
+        "columns": cols
+    }
+    return render_split_editor(data_dict, form_action=f"/sheet/edit/{sheet['sheet_id']}", is_confirmed=True, cancel_url="/")
 
 def render_html_dashboard(period_id: Optional[int] = None, scope: str = "period", active_tab: str = "overview") -> str:
     all_periods = database.get_all_periods()
@@ -2270,9 +3025,14 @@ def render_html_dashboard(period_id: Optional[int] = None, scope: str = "period"
             <span id="auditBraceDesc">ตัวเลขนี้อยู่ในกลุ่มปีกการ่วมกัน</span>
           </div>
 
-          <button onclick="closeAuditModal()" class="w-full py-2.5 bg-[#3A7D58] hover:bg-[#326C4C] text-[#FFFFFF] font-bold text-xs rounded-2xl shadow-xs transition-all cursor-pointer">
-            ตกลง / ปิดหน้าต่าง
-          </button>
+          <div class="flex items-center gap-2">
+            <a id="auditEditBtn" href="#" class="flex-1 py-2.5 bg-[#F4EFE6] hover:bg-[#EAE4D8] text-[#4A423B] font-bold text-xs rounded-2xl border border-[#DDD5C7] text-center shadow-xs transition-all flex items-center justify-center gap-1.5 text-decoration-none">
+              <span>✏️ แก้ไขข้อมูลใบนี้</span>
+            </a>
+            <button type="button" onclick="closeAuditModal()" class="flex-1 py-2.5 bg-[#3A7D58] hover:bg-[#326C4C] text-[#FFFFFF] font-bold text-xs rounded-2xl shadow-xs transition-all cursor-pointer">
+              ตกลง / ปิด
+            </button>
+          </div>
         </div>
 
       </div>
@@ -2530,6 +3290,16 @@ def render_html_dashboard(period_id: Optional[int] = None, scope: str = "period"
         zoomCont.style.display = 'none';
         placeholderEl.style.display = 'block';
         if (fullLink) fullLink.style.display = 'none';
+      }}
+
+      var editBtn = document.getElementById('auditEditBtn');
+      if (editBtn) {{
+        if (sheet && sheet.trim()) {{
+          editBtn.href = '/sheet/edit/' + encodeURIComponent(sheet.trim());
+          editBtn.style.display = 'flex';
+        }} else {{
+          editBtn.style.display = 'none';
+        }}
       }}
 
       document.getElementById('auditModal').classList.remove('hidden');
@@ -2814,6 +3584,17 @@ class LineWebhookHandler(http.server.BaseHTTPRequestHandler):
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.end_headers()
                 self.wfile.write(html)
+                return
+
+        if path.startswith("/sheet/edit/"):
+            sheet_id = urllib.parse.unquote(path.replace("/sheet/edit/", "", 1).strip())
+            if sheet_id:
+                html = render_confirmed_sheet_edit_page(sheet_id).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(html)
+                return
         if path == "/prizes":
             import prize_service
             p_id = int(qs.get("period_id", [0])[0]) or None
@@ -2981,7 +3762,7 @@ a.btn{{display:inline-block;padding:10px 18px;background:#2563eb;color:white;tex
             self.end_headers()
             return
 
-        # 2. Quick Edit Save Form POST
+        # 2. Quick Edit Save Form POST (Pending scan)
         if path.startswith("/edit/"):
             m = re.match(r"^/edit/(\d+)$", path)
             if m:
@@ -2990,38 +3771,42 @@ a.btn{{display:inline-block;padding:10px 18px;background:#2563eb;color:white;tex
                 body = self.rfile.read(content_length).decode("utf-8")
                 form = urllib.parse.parse_qs(body)
                 
-                # Reconstruct columns structure
-                new_columns = {"top": [], "bottom": [], "top_bottom": []}
-                for col_key, col_label in [("top", "บน"), ("bottom", "ล่าง"), ("top_bottom", "บนล่าง")]:
-                    idx = 0
-                    while True:
-                        s1_key = f"{col_key}_set1_{idx}"
-                        if s1_key not in form:
-                            break
-                        s1 = form.get(s1_key, [""])[0].strip()
-                        s3 = form.get(f"{col_key}_set3_{idx}", [""])[0].strip()
-                        s2 = form.get(f"{col_key}_set2_{idx}", [""])[0].strip()
-                        if s1 or s2:
-                            new_columns[col_key].append({
-                                "set1": s1,
-                                "set3": s3,
-                                "set2": s2,
-                                "raw_text": f"{s1} = {s3} {s2}".strip()
-                            })
-                        idx += 1
-                        
+                new_columns = parse_columns_from_form(form)
                 database.update_pending_scan_items(scan_id, new_columns)
+                scan = database.get_pending_scan(scan_id)
+                sheet_id = scan.get("sheet_id", "A-01") if scan else "A-01"
+                
                 confirmed = database.confirm_pending_scan(scan_id)
                 if confirmed:
                     import gdrive_sync
                     gdrive_sync.trigger_db_backup()
                 
-                success_html = """<!DOCTYPE html><html lang="th"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>บันทึกสำเร็จ</title><style>body{background:#f8fafc;font-family:sans-serif;padding:30px;text-align:center;}.card{background:white;padding:30px;border-radius:16px;max-width:400px;margin:auto;box-shadow:0 2px 5px rgba(0,0,0,0.1);}</style></head><body><div class="card"><h1 style="color:#16a34a;margin:0;">✅ บันทึกสำเร็จ!</h1><p style="color:#64748b;margin:15px 0;">ข้อมูลของคุณได้รับการแก้ไขและยืนยันเข้าระบบเรียบร้อยแล้ว</p><a href="https://line.me" style="display:inline-block;background:#06c755;color:white;padding:12px 24px;border-radius:10px;text-decoration:none;font-weight:700;">กลับไปที่ LINE</a></div></body></html>""".encode("utf-8")
+                success_html = render_edit_success_page(sheet_id, is_confirmed=False).encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.end_headers()
                 self.wfile.write(success_html)
                 return
+
+        # 2.5. Confirmed Sheet Edit Save Form POST
+        if path.startswith("/sheet/edit/"):
+            sheet_id = urllib.parse.unquote(path.replace("/sheet/edit/", "", 1).strip())
+            content_length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_length).decode("utf-8")
+            form = urllib.parse.parse_qs(body)
+            
+            new_columns = parse_columns_from_form(form)
+            updated = database.update_confirmed_sheet_entries(sheet_id, new_columns)
+            if updated:
+                import gdrive_sync
+                gdrive_sync.trigger_db_backup()
+                
+            success_html = render_edit_success_page(sheet_id, is_confirmed=True).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(success_html)
+            return
 
         # 3. LINE Webhook POST
         if path != "/webhook":

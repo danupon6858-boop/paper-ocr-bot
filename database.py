@@ -217,6 +217,15 @@ def get_all_periods() -> List[Dict]:
     conn.close()
     return rows
 
+def get_period_by_id(period_id: int) -> Optional[Dict]:
+    init_db()
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM periods WHERE id = ?", (period_id,))
+    row = cursor.fetchone()
+    conn.close()
+    return dict(row) if row else None
+
 def open_new_period(name: Optional[str] = None) -> Dict:
     init_db()
     conn = get_db_connection()
@@ -590,6 +599,151 @@ def cancel_all_pending_scans(user_id: str) -> int:
     conn.commit()
     conn.close()
     return count
+
+def get_sheet_for_edit(sheet_id_or_db_id: str) -> Optional[Dict]:
+    """
+    Fetches a confirmed sheet and all its entries formatted for the Split-View Editor.
+    Accepts either sheet_id (e.g. 'TEST-01', 'A-01') or numeric database sheet id.
+    """
+    init_db()
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    cursor.execute("""
+    SELECT s.*, p.name as period_name
+    FROM sheets s
+    LEFT JOIN periods p ON s.period_id = p.id
+    WHERE s.sheet_id = ? OR s.id = ?
+    ORDER BY s.id DESC LIMIT 1
+    """, (str(sheet_id_or_db_id), str(sheet_id_or_db_id)))
+    sheet_row = cursor.fetchone()
+    if not sheet_row:
+        conn.close()
+        return None
+        
+    sheet = dict(sheet_row)
+    cursor.execute("""
+    SELECT * FROM entries
+    WHERE sheet_db_id = ?
+    ORDER BY id ASC
+    """, (sheet["id"],))
+    entries = cursor.fetchall()
+    conn.close()
+    
+    columns = {"top": [], "bottom": [], "top_bottom": []}
+    for e in entries:
+        cat = e["category"]
+        col_key = "top" if cat == "บน" else ("bottom" if cat == "ล่าง" else "top_bottom")
+        box = []
+        if e["box_2d"]:
+            try:
+                box = json.loads(e["box_2d"])
+            except Exception:
+                box = []
+        columns[col_key].append({
+            "id": e["id"],
+            "set1": e["set1"] or "",
+            "set2": e["set2"] or "",
+            "set3": e["set3"] or "",
+            "raw_text": e["raw_text"] or "",
+            "box_2d": box,
+            "uncertain_note": e["uncertain_note"] or "",
+            "is_valid": bool(e["is_valid"])
+        })
+        
+    return {
+        "sheet": sheet,
+        "columns": columns
+    }
+
+def update_confirmed_sheet_entries(sheet_id_or_db_id: str, new_columns: dict) -> bool:
+    """
+    Updates the entries of an already confirmed sheet in the database.
+    Recalculates total_amount and content_hash.
+    """
+    init_db()
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    cursor.execute("""
+    SELECT id, period_id, sheet_id, employee_name, worker_code, date_str
+    FROM sheets
+    WHERE sheet_id = ? OR id = ?
+    ORDER BY id DESC LIMIT 1
+    """, (str(sheet_id_or_db_id), str(sheet_id_or_db_id)))
+    sheet_row = cursor.fetchone()
+    if not sheet_row:
+        conn.close()
+        return False
+        
+    sheet = dict(sheet_row)
+    sheet_db_id = sheet["id"]
+    period_id = sheet["period_id"]
+    sheet_id = sheet["sheet_id"]
+    emp_name = sheet["employee_name"]
+    worker_code = sheet["worker_code"]
+    date_str = sheet["date_str"]
+    
+    # Delete existing entries for this sheet
+    cursor.execute("DELETE FROM entries WHERE sheet_db_id = ?", (sheet_db_id,))
+    
+    total_amount_val = 0.0
+    columns_map = [("top", "บน"), ("bottom", "ล่าง"), ("top_bottom", "บนล่าง")]
+    
+    for col_key, col_label in columns_map:
+        items = new_columns.get(col_key, [])
+        for itm in items:
+            s1 = str(itm.get("set1", "")).strip()
+            s2 = str(itm.get("set2", "")).strip()
+            s3 = str(itm.get("set3", "")).strip()
+            if not s1 and not s2:
+                continue
+                
+            raw_text = itm.get("raw_text") or f"{s1} = {s3 + ' ' if s3 else ''}{s2}".strip()
+            box_2d = itm.get("box_2d", [])
+            box_str = json.dumps(box_2d) if box_2d else ""
+            unc_note = itm.get("uncertain_note", "")
+            
+            try:
+                if "x" in s2.lower():
+                    parts = s2.lower().split("x")
+                    total_amount_val += sum(float(re.sub(r'[^\d.]', '', p)) for p in parts if re.sub(r'[^\d.]', '', p))
+                else:
+                    total_amount_val += float(re.sub(r'[^\d.]', '', s2)) if re.sub(r'[^\d.]', '', s2) else 0.0
+            except Exception:
+                pass
+                
+            cursor.execute("""
+            INSERT INTO entries (period_id, sheet_db_id, sheet_id, employee_name, worker_code, date_str, category, set1, set2, set3, raw_text, is_valid, validation_error, box_2d, uncertain_note)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                period_id,
+                sheet_db_id,
+                sheet_id,
+                emp_name,
+                worker_code,
+                date_str,
+                col_label,
+                s1,
+                s2,
+                s3,
+                raw_text,
+                1,
+                "",
+                box_str,
+                unc_note
+            ))
+            
+    content_hash = compute_sheet_content_hash(new_columns)
+    cursor.execute("""
+    UPDATE sheets
+    SET total_amount = ?, content_hash = ?
+    WHERE id = ?
+    """, (str(total_amount_val), content_hash, sheet_db_id))
+    
+    conn.commit()
+    conn.close()
+    return True
 
 # ==================== AUDIT REPORT & SEQUENCE CHECK ====================
 def run_audit_report(period_id: Optional[int] = None) -> Dict:
