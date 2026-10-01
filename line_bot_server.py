@@ -1554,7 +1554,7 @@ def render_edit_success_page(sheet_id: str, is_confirmed: bool = False) -> str:
 </html>"""
 
 def render_split_editor(data_dict: dict, form_action: str, is_confirmed: bool = False, cancel_url: str = "") -> str:
-    sheet_id = data_dict.get("sheet_id", "TEST-01")
+    sheet_id = data_dict.get("sheet_id", "A-01")
     emp_name = data_dict.get("emp_name", "") or data_dict.get("employee_name", "")
     worker_code = data_dict.get("worker_code", "")
     period_name = data_dict.get("period_name", "") or "งวดปัจจุบัน"

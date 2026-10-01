@@ -38,7 +38,7 @@ def init_db():
     if cursor.fetchone()["count"] == 0:
         cursor.execute("""
         INSERT INTO periods (name, status)
-        VALUES ('งวดวันที่ 16 กันยายน 2569', 'OPEN')
+        VALUES ('งวดวันที่ 1 ตุลาคม 2569', 'OPEN')
         """)
 
     # 2. Sheets
